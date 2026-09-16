@@ -82,9 +82,6 @@ const BOTTOM_PLAYER_SELECTOR = ".main-nowPlayingBar-right";
 const LEFT_LIBRARY_SELECTOR = ".main-yourLibraryX-libraryItemContainer";
 const OBSERVER_TIMEOUT_MS = 30_000;
 const SETTINGS_ID = "catjam-settings";
-const DELAY_FIELD = "catjam-delay"; // coarse slider
-const DELAY_TEXT_FIELD = "catjam-delay-ms"; // fine-tune number input
-const BPM_FIELD = "catjam-set-bpm"; // manual BPM override
 
 const settings = new SettingsSection("Cat-Jam Settings", SETTINGS_ID);
 
@@ -256,23 +253,27 @@ let whitelistSearch = ""; // preserved across re-renders so typing survives refr
 // songs that aren't in the whitelist. `analyze` is the (deduped) fetcher, set up
 // in main().
 let analyze: ((uri: string) => Promise<AnalysisResult | null>) | undefined;
+let catController: CatJamController | undefined; // set in main(), for the panel's per-song controls
 let nowPlayingBpm: { id: string; bpm?: number } = { id: "" };
 
-function whitelistPreviewText(): string {
-  if (whitelistShowFull) {
-    const map = readOverrides(overridesStore);
-    return Object.keys(map).length
-      ? JSON.stringify(map, null, 2)
-      : "{}\n\n(empty — play some songs, or use Check BPM / Toggle double-time)";
-  }
+/** The full whitelist JSON (Song Library view). */
+function fullListText(): string {
+  const map = readOverrides(overridesStore);
+  return Object.keys(map).length
+    ? JSON.stringify(map, null, 2)
+    : "{}\n\n(empty — play some songs, or set BPM / toggle double-time)";
+}
+
+/** The current song's effective stats (Currently Playing card). Mirrors the
+ *  card shown when a search result is selected. */
+function nowPlayingCardText(): string {
   const item = Spicetify.Player.data?.item;
   const id = spotifyIdFromUri(item?.uri);
   if (!id) return "No Spotify track playing.";
   const head = `${item?.name ?? "Current track"} — ${id}\n\n`;
 
-  // Always show the effective bpm + double-time for the current song, whether or
-  // not it's saved: manual override wins, else the detected value; double-time is
-  // the manual flag, else the automatic octave fold.
+  // Manual override wins, else the detected value; double-time is the manual
+  // flag, else the automatic octave fold.
   const o = getOverride(overridesStore, id);
   const effBpm = o?.bpm ?? o?.detectedBpm ?? (nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined);
   if (effBpm == null) return head + "(detecting BPM…)";
@@ -457,15 +458,133 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
   return container;
 }
 
-/** Render the whitelist preview into an injected section (current song or full list). */
+/** A styled stats card (same look as the search-selection card). */
+function trackCard(text: string): HTMLPreElement {
+  const card = document.createElement("pre");
+  card.textContent = text;
+  card.setAttribute(
+    "style",
+    "margin: 0; padding: 12px; font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.6; " +
+      "background: var(--spice-card, rgba(255,255,255,.05)); border-radius: 8px; white-space: pre-wrap; " +
+      "word-break: break-all; user-select: text;"
+  );
+  return card;
+}
+
+/** A small section sub-heading ("Currently Playing" / "Song Library"). */
+function sectionLabel(text: string): HTMLElement {
+  const el = document.createElement("div");
+  el.textContent = text;
+  el.setAttribute(
+    "style",
+    "margin: 14px 0 6px; font-weight: 700; font-size: 14px; color: var(--spice-text, #fff);"
+  );
+  return el;
+}
+
+/** Per-song controls (sync delay + BPM + double-time), shown under the card in
+ *  Currently Playing. `card` is updated in place on delay changes. */
+function perSongControls(host: HTMLElement, card: HTMLElement): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.setAttribute("style", "margin-top: 10px;");
+  const uri = Spicetify.Player.data?.item?.uri;
+  const id = spotifyIdFromUri(uri);
+  if (!id) return wrap;
+
+  const o = getOverride(overridesStore, id);
+  const effBpm = o?.bpm ?? o?.detectedBpm ?? (nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined);
+  const apply = () => catController?.onSongChange(uri!, playerState());
+
+  // sync delay (0-500ms): label + slider + number, inline.
+  const delayRow = document.createElement("div");
+  delayRow.setAttribute("style", "display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;");
+  const delayLabel = document.createElement("span");
+  delayLabel.textContent = "sync delay (0-500ms)";
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = String(MAX_DELAY_MS);
+  slider.step = "10";
+  slider.value = String(o?.delayMs ?? 0);
+  slider.setAttribute("style", "flex: 1 1 120px;");
+  const num = document.createElement("input");
+  num.type = "number";
+  num.min = "0";
+  num.max = String(MAX_DELAY_MS);
+  num.step = "1";
+  num.value = String(o?.delayMs ?? 0);
+  num.setAttribute("style", `width: 64px; ${FIELD_STYLE}`);
+  const setDelay = (ms: number): void => {
+    const c = clampDelay(ms);
+    slider.value = String(c);
+    num.value = String(c);
+    setDelayMs(overridesStore, id, c);
+    recordName(uri, id);
+    apply();
+    card.textContent = nowPlayingCardText();
+  };
+  slider.oninput = () => setDelay(Number(slider.value) || 0);
+  num.oninput = () => setDelay(Number(num.value) || 0);
+  delayRow.append(delayLabel, slider, num);
+
+  // Set exact BPM + buttons.
+  const bpmInput = document.createElement("input");
+  bpmInput.type = "number";
+  bpmInput.min = "0";
+  bpmInput.max = "400";
+  bpmInput.step = "1";
+  bpmInput.placeholder = "Set exact BPM";
+  bpmInput.value = effBpm ? String(Math.round(effBpm)) : "";
+  bpmInput.setAttribute("style", `width: 120px; ${FIELD_STYLE}`);
+  bpmInput.onchange = () => {
+    const value = Number(bpmInput.value);
+    if (value > 0 && Number.isFinite(value)) {
+      const existing = getOverride(overridesStore, id);
+      if (existing?.detectedBpm === undefined && nowPlayingBpm.id === id && nowPlayingBpm.bpm) {
+        setDetectedBpm(overridesStore, id, nowPlayingBpm.bpm);
+      }
+      setStoredBpm(overridesStore, id, value);
+      clearDoubleTime(overridesStore, id); // re-fire auto double-time against the felt tempo
+      recordName(uri, id);
+    } else {
+      clearStoredBpm(overridesStore, id);
+    }
+    apply();
+    renderWhitelistInto(host);
+  };
+
+  const controlsRow = document.createElement("div");
+  controlsRow.setAttribute("style", "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;");
+  controlsRow.append(
+    bpmInput,
+    whitelistButton("Reset BPM", () => {
+      clearStoredBpm(overridesStore, id);
+      apply();
+      renderWhitelistInto(host);
+    }),
+    whitelistButton("Check BPM", () => {
+      if (analyze && catController) {
+        void reportCurrentBpm(analyze, catController).then(() => void refreshNowPlaying());
+      }
+    }),
+    whitelistButton("Toggle double-time", () => {
+      if (analyze && catController) {
+        void toggleDoubleTime(analyze, catController).then(() => renderWhitelistInto(host));
+      }
+    })
+  );
+
+  wrap.append(delayRow, controlsRow);
+  return wrap;
+}
+
+/** Render the injected Cat-Jam Library panel (current song card or full list). */
 function renderWhitelistInto(host: HTMLElement): void {
   host.textContent = "";
 
   const heading = document.createElement("h2");
   heading.className = "TypeElement-cello-textBase-type";
-  heading.textContent = whitelistShowFull
-    ? "Cat-Jam Whitelist — full list"
-    : "Cat-Jam Whitelist — now playing";
+  heading.textContent = "Cat-Jam Library";
 
   const removal = buildRemovalWidget(host);
 
@@ -477,17 +596,27 @@ function renderWhitelistInto(host: HTMLElement): void {
     }
   );
   const refresh = whitelistButton("Refresh", () => renderWhitelistInto(host));
+  const toggleRow = document.createElement("div");
+  toggleRow.append(toggle, refresh);
 
-  const pre = document.createElement("pre");
-  pre.textContent = whitelistPreviewText();
-  pre.setAttribute(
-    "style",
-    "max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; " +
-      "padding: 12px; font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; " +
-      "background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; user-select: text;"
-  );
+  host.append(heading, removal, toggleRow);
 
-  host.append(heading, removal, toggle, refresh, pre);
+  if (whitelistShowFull) {
+    host.append(sectionLabel("Song Library"));
+    const pre = document.createElement("pre");
+    pre.textContent = fullListText();
+    pre.setAttribute(
+      "style",
+      "max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; " +
+        "padding: 12px; font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; " +
+        "background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; user-select: text;"
+    );
+    host.append(pre);
+  } else {
+    host.append(sectionLabel("Currently Playing"));
+    const card = trackCard(nowPlayingCardText());
+    host.append(card, perSongControls(host, card));
+  }
 }
 
 /** Resolve the current track's bpm and refresh the preview to show it. */
@@ -501,7 +630,6 @@ async function refreshNowPlaying(): Promise<void> {
   const a = await analyze(uri!);
   if (spotifyIdFromUri(Spicetify.Player.data?.item?.uri) !== id) return; // track changed
   nowPlayingBpm = { id, bpm: a?.tempoBpm ?? undefined };
-  syncBpmField(); // the field can now show the resolved (detected) value
   host = document.getElementById(WHITELIST_VIEW_ID);
   if (host) renderWhitelistInto(host);
 }
@@ -535,40 +663,6 @@ async function setupWhitelistPreview(): Promise<void> {
   if (Spicetify.Platform.History.location?.pathname === "/preferences") {
     void mountWhitelistPreview();
   }
-}
-
-/**
- * Reflect a delay value in both delay controls (slider + number). Updates the
- * stored field value and the live DOM value directly — no rerender, so a
- * focused input keeps its cursor. `skipDomField` leaves the just-edited control
- * alone so typing isn't disturbed.
- */
-function writeDelayDisplays(ms: number, skipDomField?: string): void {
-  const value = String(ms);
-  for (const field of [DELAY_FIELD, DELAY_TEXT_FIELD]) {
-    settings.setFieldValue(field, value);
-    if (field !== skipDomField) {
-      const el = document.getElementById(`${SETTINGS_ID}.${field}`) as HTMLInputElement | null;
-      if (el) el.value = value;
-    }
-  }
-}
-
-/** Point both delay controls at the current song's stored value (0 if none). */
-function syncDelaySlider(): void {
-  const id = spotifyIdFromUri(Spicetify.Player.data?.item?.uri);
-  writeDelayDisplays(id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0);
-}
-
-/** Point the manual-BPM field at the current song's effective bpm (manual, else detected). */
-function syncBpmField(): void {
-  const id = spotifyIdFromUri(Spicetify.Player.data?.item?.uri);
-  const o = id ? getOverride(overridesStore, id) : undefined;
-  const bpm = o?.bpm ?? o?.detectedBpm ?? (nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined);
-  const value = bpm ? String(Math.round(bpm)) : "";
-  settings.setFieldValue(BPM_FIELD, value);
-  const el = document.getElementById(`${SETTINGS_ID}.${BPM_FIELD}`) as HTMLInputElement | null;
-  if (el) el.value = value;
 }
 
 /** Mounts the video into the first available container; null if UI changed shape. */
@@ -696,6 +790,7 @@ async function main() {
       return id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0;
     },
   });
+  catController = controller; // used by the injected panel's per-song controls
 
   // Single-flight: startup mount, songchange remounts and the settings
   // reload button can overlap while waiting for the player UI; without
@@ -704,6 +799,9 @@ async function main() {
     controller.setVideo(await mountVideo());
   });
 
+  // Only the general video settings live in the native list; the per-song
+  // controls (delay / BPM / double-time) are rendered in the injected Cat-Jam
+  // Library panel, under the Currently Playing card.
   settings.addDropDown(
     VIDEO_SOURCE_FIELD,
     "Which video to show",
@@ -730,100 +828,9 @@ async function main() {
     "Size of webM video on the left library (Only works for left library, Default: 100)",
     ""
   );
-  // Manual sync delay: a coarse slider and a fine-tune number input, both
-  // writing the current song's delay and mirroring each other's value.
-  const applyDelay = (ms: number, sourceField: string): void => {
-    // spcr-settings persists the field value before onChange fires; we read it back.
-    const uri = Spicetify.Player.data?.item?.uri;
-    const id = spotifyIdFromUri(uri);
-    if (!id) return;
-    const clamped = clampDelay(ms);
-    setDelayMs(overridesStore, id, clamped);
-    recordName(uri, id);
-    writeDelayDisplays(clamped, sourceField); // update the peer control (not the one being edited)
-    controller.onSongChange(uri!, playerState());
-  };
-  settings.addInput(
-    DELAY_FIELD,
-    `Manual sync delay for the current song (ms slider, max ${MAX_DELAY_MS})`,
-    "0",
-    () => applyDelay(Number(settings.getFieldValue(DELAY_FIELD)) || 0, DELAY_FIELD),
-    "range",
-    { min: "0", max: String(MAX_DELAY_MS), step: "10" }
-  );
-  settings.addInput(
-    DELAY_TEXT_FIELD,
-    `Manual sync delay — fine tune (exact ms, 0-${MAX_DELAY_MS})`,
-    "0",
-    () => applyDelay(Number(settings.getFieldValue(DELAY_TEXT_FIELD)) || 0, DELAY_TEXT_FIELD),
-    "number",
-    { min: "0", max: String(MAX_DELAY_MS), step: "1" }
-  );
-  // Manual BPM override: authoritative over detection (accurate for songs the
-  // preview analysis gets wrong). Blank clears it back to the detected value.
-  settings.addInput(
-    BPM_FIELD,
-    "Set exact BPM for the current song (blank = use detected)",
-    "",
-    () => {
-      const uri = Spicetify.Player.data?.item?.uri;
-      const id = spotifyIdFromUri(uri);
-      if (!id) return;
-      const value = Number(settings.getFieldValue(BPM_FIELD));
-      if (value > 0 && Number.isFinite(value)) {
-        // Preserve the detected value the first time it's overridden, so it can
-        // be reset to later.
-        const existing = getOverride(overridesStore, id);
-        if (existing?.detectedBpm === undefined && nowPlayingBpm.id === id && nowPlayingBpm.bpm) {
-          setDetectedBpm(overridesStore, id, nowPlayingBpm.bpm);
-        }
-        setStoredBpm(overridesStore, id, value);
-        // The entered value is usually the felt tempo, so re-fire the auto
-        // double-time check against it (drop any stale manual override).
-        clearDoubleTime(overridesStore, id);
-        recordName(uri, id);
-      } else {
-        clearStoredBpm(overridesStore, id);
-      }
-      controller.onSongChange(uri!, playerState());
-      void refreshNowPlaying(); // reflect the new bpm + double-time in the preview
-    },
-    "number",
-    { min: "0", max: "400", step: "1" }
-  );
-  settings.addButton(
-    "catjam-reset-bpm",
-    "Reset the exact BPM back to the auto-detected value",
-    "Reset BPM to detected",
-    () => {
-      const uri = Spicetify.Player.data?.item?.uri;
-      const id = spotifyIdFromUri(uri);
-      if (!id) return;
-      clearStoredBpm(overridesStore, id);
-      controller.onSongChange(uri!, playerState());
-      syncBpmField();
-      void refreshNowPlaying();
-    }
-  );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();
   });
-  settings.addButton(
-    "catjam-check-bpm",
-    "Check the BPM of the current song",
-    "Check BPM",
-    () => {
-      void reportCurrentBpm(fetchAnalysis, controller);
-    }
-  );
-  settings.addButton(
-    "catjam-toggle-doubletime",
-    "Toggle double-time for the current song (override auto BPM detection)",
-    "Toggle double-time",
-    () => {
-      void toggleDoubleTime(fetchAnalysis, controller);
-    }
-  );
   void settings.pushSettings();
   // The whitelist preview + search-and-remove widget are injected below the
   // settings (spcr-settings can't render a dynamic dropdown).
@@ -837,9 +844,7 @@ async function main() {
       void ensureMounted(); // Spotify rebuilt its DOM; remount lazily
     }
     controller.onSongChange(Spicetify.Player.data?.item?.uri, playerState());
-    syncDelaySlider(); // show the new song's stored delay in the slider
-    syncBpmField(); // show the new song's manual bpm override (if any)
-    void refreshNowPlaying(); // keep the preview on the now-playing song + its detected bpm
+    void refreshNowPlaying(); // move the panel + its controls to the now-playing song
   });
 
   Spicetify.Player.addEventListener("onplaypause", () => {
