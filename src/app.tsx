@@ -322,25 +322,6 @@ function resolveRemovalTarget(text: string): string | null {
   return matches.length === 1 ? matches[0].id : null;
 }
 
-/** Show an "are you sure" prompt, running onConfirm only if the user confirms. */
-function confirmRemove(label: string, onConfirm: () => void): void {
-  const box = document.createElement("div");
-  const msg = document.createElement("p");
-  msg.textContent = `Are you sure you want to remove "${label}" from the whitelist?`;
-  msg.setAttribute("style", "margin: 0 0 16px;");
-  const buttons = document.createElement("div");
-  buttons.setAttribute("style", "display: flex; gap: 8px; justify-content: flex-end;");
-  buttons.append(
-    whitelistButton("Cancel", () => Spicetify.PopupModal.hide()),
-    whitelistButton("Remove", () => {
-      Spicetify.PopupModal.hide();
-      onConfirm();
-    })
-  );
-  box.append(msg, buttons);
-  Spicetify.PopupModal.display({ title: "Cat-Jam", content: box });
-}
-
 /**
  * Type-to-search removal: a styled custom combobox filters the whitelist as you
  * type, the picked entry's data shows underneath, and "Remove selected" confirms
@@ -409,11 +390,12 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
       opt.onmouseenter = () => (opt.style.background = "var(--spice-highlight, rgba(255,255,255,.1))");
       opt.onmouseleave = () => (opt.style.background = "transparent");
       opt.onmousedown = (e) => {
-        e.preventDefault(); // keep input focus; fires before blur
+        e.preventDefault(); // set the value before the blur hides the list
         input.value = m.label;
         whitelistSearch = m.label;
         dropdown.style.display = "none";
         updateSelected();
+        input.blur(); // so clicking back in later re-fires focus and clears
       };
       dropdown.appendChild(opt);
     }
@@ -438,6 +420,13 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
   input.onblur = () => window.setTimeout(() => (dropdown.style.display = "none"), 150);
   updateSelected();
 
+  // Inline "are you sure" confirmation (PopupModal doesn't fire on some clients).
+  const confirmRow = document.createElement("div");
+  confirmRow.setAttribute(
+    "style",
+    "display: none; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; color: var(--spice-text, #fff);"
+  );
+
   const remove = whitelistButton("Remove selected", () => {
     const id = resolveRemovalTarget(input.value);
     if (!id) {
@@ -445,17 +434,25 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
       return;
     }
     const name = getOverride(overridesStore, id)?.name ?? id;
-    confirmRemove(name, () => {
-      removeOverride(overridesStore, id);
-      whitelistSearch = "";
-      Spicetify.showNotification(`Cat-Jam: removed ${name}`);
-      renderWhitelistInto(host);
-    });
+    confirmRow.textContent = "";
+    const prompt = document.createElement("span");
+    prompt.textContent = `Remove "${name}"?`;
+    confirmRow.append(
+      prompt,
+      whitelistButton("Yes, remove", () => {
+        removeOverride(overridesStore, id);
+        whitelistSearch = "";
+        Spicetify.showNotification(`Cat-Jam: removed ${name}`);
+        renderWhitelistInto(host);
+      }),
+      whitelistButton("Cancel", () => (confirmRow.style.display = "none"))
+    );
+    confirmRow.style.display = "flex";
   });
 
   combo.append(input, dropdown);
   row.append(combo, remove);
-  container.append(row, selectedInfo);
+  container.append(row, confirmRow, selectedInfo);
   return container;
 }
 
