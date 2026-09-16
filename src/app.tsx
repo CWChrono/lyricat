@@ -247,6 +247,12 @@ function searchWhitelist(pattern: string): Array<{ id: string; label: string }> 
 let whitelistShowFull = false;
 let whitelistSearch = ""; // preserved across re-renders so typing survives refreshes
 
+// The current track's resolved bpm, so the preview can show detected values for
+// songs that aren't in the whitelist. `analyze` is the (deduped) fetcher, set up
+// in main().
+let analyze: ((uri: string) => Promise<AnalysisResult | null>) | undefined;
+let nowPlayingBpm: { id: string; bpm?: number } = { id: "" };
+
 function whitelistPreviewText(): string {
   if (whitelistShowFull) {
     const map = readOverrides(overridesStore);
@@ -257,9 +263,16 @@ function whitelistPreviewText(): string {
   const item = Spicetify.Player.data?.item;
   const id = spotifyIdFromUri(item?.uri);
   if (!id) return "No Spotify track playing.";
-  const entry = getOverride(overridesStore, id);
   const head = `${item?.name ?? "Current track"} — ${id}\n\n`;
-  return head + (entry ? JSON.stringify(entry, null, 2) : "(not in whitelist yet)");
+
+  const entry = getOverride(overridesStore, id);
+  if (entry) return head + JSON.stringify(entry, null, 2);
+
+  // Not saved: show what the extension detected (bpm + the auto double-time fold).
+  const detected = nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined;
+  if (detected == null) return head + "(not in whitelist yet — detecting BPM…)";
+  const detectedInfo = { bpm: Math.round(detected), doubleTime: normalizeTempo(detected) < detected };
+  return head + "(not in whitelist yet — detected)\n" + JSON.stringify(detectedInfo, null, 2);
 }
 
 function whitelistButton(label: string, onClick: () => void): HTMLButtonElement {
@@ -367,6 +380,21 @@ function renderWhitelistInto(host: HTMLElement): void {
   );
 
   host.append(heading, removal, toggle, refresh, pre);
+}
+
+/** Resolve the current track's bpm and refresh the preview to show it. */
+async function refreshNowPlaying(): Promise<void> {
+  const uri = Spicetify.Player.data?.item?.uri;
+  const id = spotifyIdFromUri(uri);
+  nowPlayingBpm = { id: id ?? "" };
+  let host = document.getElementById(WHITELIST_VIEW_ID);
+  if (host) renderWhitelistInto(host); // reflect the new track (may show "detecting…")
+  if (!id || !analyze) return;
+  const a = await analyze(uri!);
+  if (spotifyIdFromUri(Spicetify.Player.data?.item?.uri) !== id) return; // track changed
+  nowPlayingBpm = { id, bpm: a?.tempoBpm ?? undefined };
+  host = document.getElementById(WHITELIST_VIEW_ID);
+  if (host) renderWhitelistInto(host);
 }
 
 /** Inject the preview as a sibling right after the Cat-Jam settings section. */
@@ -508,7 +536,7 @@ async function main() {
   // from ReccoBeats. The id lookup covers most tracks; anything it misses falls
   // back to a stored value (from the preview analysis run via the buttons).
   const liveFetch = createAnalysisFetcher((url) => fetch(url), sleep);
-  const fetchAnalysis = async (uri: string): Promise<AnalysisResult | null> => {
+  const resolveAnalysis = async (uri: string): Promise<AnalysisResult | null> => {
     const id = spotifyIdFromUri(uri);
     // 1) A stored bpm (manual override, or a cached preview result) always wins.
     const stored = id ? getOverride(overridesStore, id)?.bpm : undefined;
@@ -527,6 +555,18 @@ async function main() {
     }
     return live; // null — no preview available / analysis failed
   };
+  // Dedupe concurrent lookups for the same uri (controller + preview both ask on
+  // song change) so a missing track's preview isn't analysed twice.
+  const inFlight = new Map<string, Promise<AnalysisResult | null>>();
+  const fetchAnalysis = (uri: string): Promise<AnalysisResult | null> => {
+    let pending = inFlight.get(uri);
+    if (!pending) {
+      pending = resolveAnalysis(uri).finally(() => inFlight.delete(uri));
+      inFlight.set(uri, pending);
+    }
+    return pending;
+  };
+  analyze = fetchAnalysis;
 
   const controller = new CatJamController({
     getConfig,
@@ -650,6 +690,7 @@ async function main() {
   void setupWhitelistPreview();
 
   await ensureMounted();
+  void refreshNowPlaying(); // populate detected bpm for the track already playing
 
   Spicetify.Player.addEventListener("songchange", () => {
     if (!document.getElementById(VIDEO_ID)?.isConnected) {
@@ -658,8 +699,7 @@ async function main() {
     controller.onSongChange(Spicetify.Player.data?.item?.uri, playerState());
     syncDelaySlider(); // show the new song's stored delay in the slider
     syncBpmField(); // show the new song's manual bpm override (if any)
-    const host = document.getElementById(WHITELIST_VIEW_ID);
-    if (host) renderWhitelistInto(host); // keep the preview on the now-playing song
+    void refreshNowPlaying(); // keep the preview on the now-playing song + its detected bpm
   });
 
   Spicetify.Player.addEventListener("onplaypause", () => {
