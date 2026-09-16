@@ -61,6 +61,12 @@ describe("pulseEnvelope", () => {
     expect(pulseEnvelope(0.3)).toBeGreaterThan(pulseEnvelope(0.6));
     expect(pulseEnvelope(0.6)).toBeGreaterThan(pulseEnvelope(0.9));
   });
+  it("sharpness>1 makes the pulse more abrupt: peaks earlier, rests by mid-beat", () => {
+    expect(pulseEnvelope(0.06, 2)).toBeCloseTo(1); // peak arrives at half the phase
+    expect(pulseEnvelope(0.5, 2)).toBeCloseTo(0); // fully rested by the mid-beat
+    expect(pulseEnvelope(0.6, 1)).toBeGreaterThan(0); // still going at 1x…
+    expect(pulseEnvelope(0.6, 2)).toBeCloseTo(0); // …already at rest at 2x
+  });
 });
 
 describe("onsetEnvelope", () => {
@@ -126,24 +132,30 @@ describe("createVideoPulse (animator)", () => {
   const fakeVideo = (transform = "") =>
     ({ style: { transform, transformOrigin: "", filter: "" } }) as unknown as HTMLVideoElement;
   const tick = () => frameCb?.(0);
-  // 250 ms at 120 bpm → mid-beat: a clear, stable pulse away from the sharp peak.
+  // 75 ms at 120 bpm → phase 0.15: both the glow and the (sharper) bounce are
+  // active there. Mid-beat (phase 0.5) is now rest for the sharpened scale.
   const playingAt = (ms: number) => ({ getProgress: () => ms, isPlaying: () => true });
   const num = (re: RegExp, s: string) => parseFloat(re.exec(s)![1]);
 
   it("brightens and bounces on the beat while playing", () => {
-    const p = createVideoPulse(() => ({ brightness: true, scale: true, intensity: 1 }), playingAt(250));
+    const p = createVideoPulse(() => ({ brightness: true, scale: true, intensity: 1 }), playingAt(75));
     const v = fakeVideo();
     p.attach(v);
     p.setTrack(120, 1);
     tick();
     expect(num(/brightness\(([\d.]+)\)/, v.style.filter)).toBeGreaterThan(1);
-    const scale = num(/scale\(([\d.]+)\)/, v.style.transform);
-    expect(scale).toBeGreaterThan(1);
-    expect(scale).toBeLessThanOrEqual(1.06); // "very slight"
+    // Non-uniform: mostly vertical (sy), slight rightward lean (sx < sy).
+    const sx = num(/scale\(([\d.]+),/, v.style.transform);
+    const sy = num(/scale\([\d.]+,\s*([\d.]+)\)/, v.style.transform);
+    expect(sy).toBeGreaterThan(1);
+    expect(sy).toBeLessThanOrEqual(1.06); // "very slight"
+    expect(sx).toBeGreaterThan(1); // grows rightward a little…
+    expect(sx).toBeLessThan(sy); // …but far less than it grows upward
+    expect(v.style.transformOrigin).toBe("left bottom"); // bottom-left pivot
   });
 
   it("composes the scale with the base transform (Bongo translateY preserved)", () => {
-    const p = createVideoPulse(() => ({ brightness: false, scale: true, intensity: 1 }), playingAt(250));
+    const p = createVideoPulse(() => ({ brightness: false, scale: true, intensity: 1 }), playingAt(75));
     const v = fakeVideo("translateY(17px)");
     p.attach(v);
     p.setTrack(120, 1);

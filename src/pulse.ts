@@ -51,6 +51,17 @@ const MAX_SCALE_BOOST = 0.06; // peak added scale (+6%) — kept "very slight"
 const ATTACK = 0.12; // fraction of a beat spent rising to the peak
 const DECAY_EXP = 1.8; // how sharply the pulse falls after the peak
 const ONSET_DECAY_MS = 380; // fallback decay window for a lone onset (no next one)
+// The bounce (scale) uses a sharper envelope than the brightness glow: it snaps
+// up and settles in the first 1/SCALE_SHARPNESS of the beat, then rests flat.
+const SCALE_SHARPNESS = 2;
+// The bounce pivots on the bottom-left corner and grows mostly upward with a
+// slight rightward lean (~12° clockwise from vertical), so the bottom cutoff
+// line stays put. Horizontal growth is this fraction of the vertical growth.
+const SCALE_ANGLE_RATIO = 0.2;
+// Only re-anchor the smooth clock when the reported position jumps more than
+// this (a real seek) — ignoring Spotify's coarse per-tick samples keeps the
+// pulse from stuttering as it eases back to rest.
+const RESYNC_MS = 250;
 
 export function clamp01(x: number): number {
   if (!Number.isFinite(x)) return 0;
@@ -79,12 +90,14 @@ export function beatPhase(progressSec: number, feltBpm: number): number {
 /**
  * Pulse envelope over one beat: a quick rise to a peak just after the beat,
  * then an eased decay back to rest. Continuous at the beat boundary (0→…→0),
- * so it reads as a smooth throb rather than a strobe.
+ * so it reads as a smooth throb rather than a strobe. `sharpness` > 1 compresses
+ * the whole pulse into the first 1/sharpness of the beat (a more abrupt snap),
+ * resting flat for the remainder.
  */
-export function pulseEnvelope(phase: number): number {
-  const p = clamp01(phase);
+export function pulseEnvelope(phase: number, sharpness = 1): number {
+  const p = clamp01(phase * (sharpness > 0 ? sharpness : 1));
   if (p < ATTACK) return p / ATTACK; // 0 → 1 rise
-  const fall = (1 - p) / (1 - ATTACK); // 1 → 0 across the rest of the beat
+  const fall = (1 - p) / (1 - ATTACK); // 1 → 0 across the rest of the window
   return Math.pow(clamp01(fall), DECAY_EXP);
 }
 
@@ -93,7 +106,11 @@ export function pulseEnvelope(phase: number): number {
  * onset at//before `progressMs` and shapes a pulse across the gap to the next
  * onset (or a default window for the last one). Empty/no-onset → rest (0).
  */
-export function onsetEnvelope(progressMs: number, onsetsMs: readonly number[]): number {
+export function onsetEnvelope(
+  progressMs: number,
+  onsetsMs: readonly number[],
+  sharpness = 1
+): number {
   if (!onsetsMs || onsetsMs.length === 0) return 0;
   // Most recent onset <= now (binary search on the sorted array).
   let lo = 0;
@@ -112,7 +129,7 @@ export function onsetEnvelope(progressMs: number, onsetsMs: readonly number[]): 
   const start = onsetsMs[idx];
   const next = idx + 1 < onsetsMs.length ? onsetsMs[idx + 1] : start + ONSET_DECAY_MS;
   const window = Math.max(1, Math.min(next - start, ONSET_DECAY_MS));
-  return pulseEnvelope((progressMs - start) / window);
+  return pulseEnvelope((progressMs - start) / window, sharpness);
 }
 
 /** brightness() multiplier for the current envelope. Rests at 1 (normal). */
@@ -158,11 +175,12 @@ export function createVideoPulse(
   let onsets: number[] | null = null;
   let raf: number | null = null;
 
-  // Extrapolated clock: re-anchor whenever the player reports a new progress
-  // sample, advance with wall-time in between.
-  let lastSample = -1;
+  // Extrapolated clock: anchor once, then advance with wall-time, re-anchoring
+  // only on a seek. Between Spotify's coarse progress ticks the pulse runs off
+  // performance.now(), so it eases back to rest without stutter.
   let anchorMs = 0;
   let anchorWall = now();
+  let clockPlaying = false; // false → next playing frame re-anchors (fresh/after pause)
   let idle = false; // true once we've reset the video to rest, to skip rework
 
   function reset(): void {
@@ -171,14 +189,21 @@ export function createVideoPulse(
     video.style.transform = baseTransform;
   }
 
-  function estProgressMs(playing: boolean): number {
+  function estProgressMs(): number {
     const sample = player.getProgress();
-    if (sample !== lastSample) {
-      lastSample = sample;
+    if (!clockPlaying) {
       anchorMs = sample;
       anchorWall = now();
+      clockPlaying = true;
+      return sample;
     }
-    return playing ? anchorMs + (now() - anchorWall) : anchorMs;
+    const est = anchorMs + (now() - anchorWall);
+    if (Math.abs(sample - est) > RESYNC_MS) {
+      anchorMs = sample; // a real seek — snap to it
+      anchorWall = now();
+      return sample;
+    }
+    return est; // ignore the coarse per-tick sample; stay smooth
   }
 
   function frame(): void {
@@ -187,6 +212,7 @@ export function createVideoPulse(
     const cfg = getConfig();
     const playing = player.isPlaying();
     if ((!cfg.brightness && !cfg.scale) || !playing || depth <= 0) {
+      clockPlaying = false; // resume re-anchors instead of jumping the paused gap
       if (!idle) {
         reset();
         idle = true;
@@ -194,16 +220,27 @@ export function createVideoPulse(
       return;
     }
     idle = false;
-    const ms = estProgressMs(playing);
-    const env =
-      onsets && onsets.length
-        ? onsetEnvelope(ms, onsets)
-        : pulseEnvelope(beatPhase(ms / 1000, feltBpm ?? PULSE_DEFAULT_BPM));
+    const ms = estProgressMs();
+    // Brightness glows over the whole beat; the bounce snaps (SCALE_SHARPNESS).
+    let brightnessEnv: number;
+    let scaleEnv: number;
+    if (onsets && onsets.length) {
+      brightnessEnv = onsetEnvelope(ms, onsets);
+      scaleEnv = onsetEnvelope(ms, onsets, SCALE_SHARPNESS);
+    } else {
+      const phase = beatPhase(ms / 1000, feltBpm ?? PULSE_DEFAULT_BPM);
+      brightnessEnv = pulseEnvelope(phase);
+      scaleEnv = pulseEnvelope(phase, SCALE_SHARPNESS);
+    }
     video.style.filter = cfg.brightness
-      ? `brightness(${brightnessFor(env, depth, cfg.intensity, true).toFixed(4)})`
+      ? `brightness(${brightnessFor(brightnessEnv, depth, cfg.intensity, true).toFixed(4)})`
       : "";
+    // Non-uniform scale about the bottom-left pivot: mostly vertical (sy) with a
+    // slight rightward lean (sx), so the bottom edge stays fixed.
+    const sy = scaleFor(scaleEnv, depth, cfg.intensity, true);
+    const sx = 1 + (sy - 1) * SCALE_ANGLE_RATIO;
     video.style.transform = cfg.scale
-      ? `${baseTransform} scale(${scaleFor(env, depth, cfg.intensity, true).toFixed(4)})`.trim()
+      ? `${baseTransform} scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`.trim()
       : baseTransform;
   }
 
@@ -212,10 +249,11 @@ export function createVideoPulse(
       if (video && video !== v) reset();
       video = v;
       idle = false;
-      lastSample = -1;
+      clockPlaying = false; // (re-set below when a video is present)
       if (v) {
         baseTransform = v.style.transform || "";
-        if (!v.style.transformOrigin) v.style.transformOrigin = "center bottom";
+        v.style.transformOrigin = "left bottom"; // pivot: pin the bottom-left corner
+        v.style.willChange = "transform, filter"; // GPU layer → smooth, jitter-free pulse
         if (raf === null) raf = requestAnimationFrame(frame);
       } else if (raf !== null) {
         cancelAnimationFrame(raf);

@@ -122,7 +122,7 @@ const BONGO_MAX_RATE = 0.35;
 // Nudge into place and force it above every overlay (max z-index). `position`
 // is added per-slot in mountVideo so z-index applies without breaking the
 // absolutely-positioned left-library layout.
-const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(17px); z-index: 2147483647;";
+const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(15px); z-index: 2147483647;";
 
 function currentSource(): string {
   return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
