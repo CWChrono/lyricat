@@ -29,6 +29,7 @@ import {
   setDelayMs,
   setTrackName,
   flipDoubleTime,
+  clearDoubleTime,
   removeOverride,
   matchByName,
   clampDelay,
@@ -777,11 +778,15 @@ async function main() {
           setDetectedBpm(overridesStore, id, nowPlayingBpm.bpm);
         }
         setStoredBpm(overridesStore, id, value);
+        // The entered value is usually the felt tempo, so re-fire the auto
+        // double-time check against it (drop any stale manual override).
+        clearDoubleTime(overridesStore, id);
         recordName(uri, id);
       } else {
         clearStoredBpm(overridesStore, id);
       }
       controller.onSongChange(uri!, playerState());
+      void refreshNowPlaying(); // reflect the new bpm + double-time in the preview
     },
     "number",
     { min: "0", max: "400", step: "1" }

@@ -180,3 +180,24 @@ export function flipDoubleTime(
   writeOverride(store, id, { doubleTime: next });
   return next;
 }
+
+/**
+ * Drop a track's manual double-time override so it reverts to the automatic
+ * octave-fold check. Removes the whole entry if nothing meaningful remains.
+ */
+export function clearDoubleTime(store: KeyValueStore, id: string): void {
+  const all = readOverrides(store);
+  const entry = all[id];
+  if (!entry || entry.doubleTime === undefined) return;
+  delete entry.doubleTime;
+  if (
+    entry.bpm === undefined &&
+    entry.detectedBpm === undefined &&
+    entry.delayMs === undefined
+  ) {
+    delete all[id];
+  } else {
+    all[id] = entry;
+  }
+  store.set(STORAGE_KEY, JSON.stringify(all));
+}
