@@ -238,7 +238,6 @@ async function toggleDoubleTime(
 }
 
 const WHITELIST_VIEW_ID = "catjam-whitelist-view";
-const REMOVE_FIELD = "catjam-remove-id";
 
 /** Extract a base-62 track id from a raw id, spotify: uri, or open.spotify URL. */
 function parseTrackId(input: string): string | null {
@@ -251,38 +250,30 @@ function parseTrackId(input: string): string | null {
   return null;
 }
 
-/** Remove-field action: delete by track id/URL, else by best-effort name regex. */
-function removeFromWhitelist(): void {
-  const raw = String(settings.getFieldValue(REMOVE_FIELD) || "").trim();
-  if (!raw) {
-    Spicetify.showNotification("Cat-Jam: enter a track id, URL, or song name", true);
-    return;
-  }
-  const id = parseTrackId(raw);
-  if (id) {
-    const removed = removeOverride(overridesStore, id);
-    Spicetify.showNotification(
-      removed ? `Cat-Jam: removed ${id}` : `Cat-Jam: ${id} not in whitelist`,
-      !removed
-    );
-  } else {
-    const ids = matchByName(overridesStore, raw);
-    if (ids.length === 0) {
-      Spicetify.showNotification(`Cat-Jam: no whitelist names match "${raw}"`, true);
-      return;
-    }
-    const names = ids.map((i) => getOverride(overridesStore, i)?.name ?? i);
-    ids.forEach((i) => removeOverride(overridesStore, i));
-    Spicetify.showNotification(`Cat-Jam: removed ${ids.length} — ${names.join(", ")}`);
-  }
-  settings.setFieldValue(REMOVE_FIELD, "");
-  settings.rerender();
-  void mountWhitelistPreview(); // refresh the inline preview
+/**
+ * Filter the whitelist by a query — matched against song name (regex/substring,
+ * `%kill%` style) and track id/URL. Empty query returns every entry.
+ */
+function searchWhitelist(pattern: string): Array<{ id: string; label: string }> {
+  const map = readOverrides(overridesStore);
+  const all = Object.entries(map).map(([id, o]) => ({
+    id,
+    label: o.name ? `${o.name}  ·  ${id}` : id,
+  }));
+  const q = pattern.trim();
+  if (!q) return all;
+  const nameIds = new Set(matchByName(overridesStore, q));
+  const parsed = parseTrackId(q);
+  const ql = q.toLowerCase();
+  return all.filter(
+    (e) => nameIds.has(e.id) || e.id === parsed || e.id.toLowerCase().includes(ql)
+  );
 }
 
 // The preview defaults to the now-playing track's own entry; the full JSON
 // list is available on demand.
 let whitelistShowFull = false;
+let whitelistSearch = ""; // preserved across re-renders so typing survives refreshes
 
 function whitelistPreviewText(): string {
   if (whitelistShowFull) {
@@ -312,6 +303,67 @@ function whitelistButton(label: string, onClick: () => void): HTMLButtonElement 
   return button;
 }
 
+const FIELD_STYLE =
+  "padding: 6px 10px; border-radius: 8px; border: 1px solid var(--spice-button-disabled, #555); " +
+  "background: var(--spice-main, rgba(0,0,0,.3)); color: var(--spice-text, #fff);";
+
+/**
+ * Search-and-remove widget: a text box filters the whitelist as you type, a
+ * dropdown lists the matches, and the button deletes the selected one — all in
+ * one row. `host` is re-rendered after a deletion to refresh the list + preview.
+ */
+function buildRemovalWidget(host: HTMLElement): HTMLElement {
+  const row = document.createElement("div");
+  row.setAttribute("style", "display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 10px;");
+
+  const search = document.createElement("input");
+  search.type = "text";
+  search.placeholder = "Search whitelist to remove (name or id)…";
+  search.value = whitelistSearch;
+  search.setAttribute("style", `flex: 1 1 160px; ${FIELD_STYLE}`);
+
+  const select = document.createElement("select");
+  select.setAttribute("style", `flex: 2 1 220px; ${FIELD_STYLE}`);
+
+  const remove = whitelistButton("Remove selected", () => {
+    const id = select.value;
+    if (!id) {
+      Spicetify.showNotification("Cat-Jam: no entry selected", true);
+      return;
+    }
+    const name = getOverride(overridesStore, id)?.name ?? id;
+    removeOverride(overridesStore, id);
+    Spicetify.showNotification(`Cat-Jam: removed ${name}`);
+    renderWhitelistInto(host);
+  });
+
+  const fill = (): void => {
+    const matches = searchWhitelist(whitelistSearch);
+    select.textContent = "";
+    if (matches.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(no matches)";
+      select.appendChild(opt);
+      return;
+    }
+    for (const m of matches) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      select.appendChild(opt);
+    }
+  };
+  search.oninput = () => {
+    whitelistSearch = search.value;
+    fill();
+  };
+  fill();
+
+  row.append(search, select, remove);
+  return row;
+}
+
 /** Render the whitelist preview into an injected section (current song or full list). */
 function renderWhitelistInto(host: HTMLElement): void {
   host.textContent = "";
@@ -321,6 +373,8 @@ function renderWhitelistInto(host: HTMLElement): void {
   heading.textContent = whitelistShowFull
     ? "Cat-Jam Whitelist — full list"
     : "Cat-Jam Whitelist — now playing";
+
+  const removal = buildRemovalWidget(host);
 
   const toggle = whitelistButton(
     whitelistShowFull ? "Show current song" : "Show full list",
@@ -340,7 +394,7 @@ function renderWhitelistInto(host: HTMLElement): void {
       "background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; user-select: text;"
   );
 
-  host.append(heading, toggle, refresh, pre);
+  host.append(heading, removal, toggle, refresh, pre);
 }
 
 /** Inject the preview as a sibling right after the Cat-Jam settings section. */
@@ -585,21 +639,10 @@ async function main() {
       void toggleDoubleTime(fetchAnalysis, controller);
     }
   );
-  settings.addInput(
-    REMOVE_FIELD,
-    "Remove from whitelist — track id / URL, or song name (regex)",
-    ""
-  );
-  settings.addButton(
-    "catjam-remove",
-    "Delete the whitelist entry matching the field above",
-    "Remove from whitelist",
-    () => {
-      removeFromWhitelist();
-    }
-  );
   void settings.pushSettings();
-  void setupWhitelistPreview(); // inject the scrollable whitelist below the settings
+  // The whitelist preview + search-and-remove widget are injected below the
+  // settings (spcr-settings can't render a dynamic dropdown).
+  void setupWhitelistPreview();
 
   await ensureMounted();
 
