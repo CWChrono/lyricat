@@ -179,21 +179,71 @@ async function toggleDoubleTime(
   );
 }
 
-/** Show the per-song whitelist as a scrollable, selectable JSON preview. */
-function openWhitelist(): void {
+const WHITELIST_VIEW_ID = "catjam-whitelist-view";
+
+/** Render the whitelist JSON (scrollable, selectable) into an injected section. */
+function renderWhitelistInto(host: HTMLElement): void {
   const map = readOverrides(overridesStore);
-  const json = JSON.stringify(map, null, 2);
-  const box = document.createElement("pre");
-  box.textContent =
-    Object.keys(map).length === 0
-      ? "{}\n\n(empty — play some songs, or use Check BPM / Toggle double-time)"
-      : json;
-  box.style.cssText =
-    "max-height: 55vh; overflow: auto; white-space: pre-wrap; word-break: break-all; " +
-    "margin: 0; padding: 12px; font-family: var(--font-mono, monospace); font-size: 12px; " +
-    "line-height: 1.5; background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; " +
-    "user-select: text;";
-  Spicetify.PopupModal.display({ title: "Cat-Jam whitelist", content: box, isLarge: true });
+  const json = Object.keys(map).length
+    ? JSON.stringify(map, null, 2)
+    : "{}\n\n(empty — play some songs, or use Check BPM / Toggle double-time)";
+  host.textContent = "";
+
+  const heading = document.createElement("h2");
+  heading.className = "TypeElement-cello-textBase-type";
+  heading.textContent = "Cat-Jam Whitelist";
+
+  const refresh = document.createElement("button");
+  refresh.textContent = "Refresh";
+  refresh.setAttribute(
+    "style",
+    "margin: 4px 0 8px; padding: 4px 14px; border-radius: 16px; cursor: pointer; " +
+      "border: 1px solid var(--spice-button-disabled, #555); background: transparent; " +
+      "color: var(--spice-text, #fff);"
+  );
+  refresh.onclick = () => renderWhitelistInto(host);
+
+  const pre = document.createElement("pre");
+  pre.textContent = json;
+  pre.setAttribute(
+    "style",
+    "max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; " +
+      "padding: 12px; font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; " +
+      "background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; user-select: text;"
+  );
+
+  host.append(heading, refresh, pre);
+}
+
+/** Inject the preview as a sibling right after the Cat-Jam settings section. */
+async function mountWhitelistPreview(): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const section = document.getElementById("catjam-settings");
+    if (section?.parentElement) {
+      let host = document.getElementById(WHITELIST_VIEW_ID);
+      if (!host || host.parentElement !== section.parentElement) {
+        host?.remove();
+        host = document.createElement("div");
+        host.id = WHITELIST_VIEW_ID;
+        host.className = "x-settings-section";
+        section.parentElement.insertBefore(host, section.nextSibling);
+      }
+      renderWhitelistInto(host);
+      return;
+    }
+    await sleep(100);
+  }
+}
+
+/** Re-inject the preview whenever the user opens Spotify's preferences page. */
+async function setupWhitelistPreview(): Promise<void> {
+  while (!Spicetify?.Platform?.History?.listen) await sleep(100);
+  Spicetify.Platform.History.listen((loc: { pathname?: string }) => {
+    if (loc?.pathname === "/preferences") void mountWhitelistPreview();
+  });
+  if (Spicetify.Platform.History.location?.pathname === "/preferences") {
+    void mountWhitelistPreview();
+  }
 }
 
 /** Point the delay slider at the current song's stored value (0 if none). */
@@ -376,15 +426,8 @@ async function main() {
       void toggleDoubleTime(fetchAnalysis, controller);
     }
   );
-  settings.addButton(
-    "catjam-open-whitelist",
-    "View the per-song whitelist (scrollable preview of bpm / double-time / delay)",
-    "View whitelist",
-    () => {
-      openWhitelist();
-    }
-  );
   void settings.pushSettings();
+  void setupWhitelistPreview(); // inject the scrollable whitelist below the settings
 
   await ensureMounted();
 
