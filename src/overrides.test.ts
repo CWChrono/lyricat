@@ -3,6 +3,7 @@ import {
   readOverrides,
   getOverride,
   setStoredBpm,
+  setDetectedBpm,
   clearStoredBpm,
   setDelayMs,
   setTrackName,
@@ -75,16 +76,25 @@ describe("overrides", () => {
     expect(getOverride(s, "A")).toEqual({ delayMs: 500 });
   });
 
-  it("clears a stored bpm, dropping the entry when nothing else remains", () => {
+  it("clears a manual bpm but keeps the detected value to reset to", () => {
     const s = memStore();
-    setStoredBpm(s, "A", 128);
+    setDetectedBpm(s, "A", 145);
+    setStoredBpm(s, "A", 92);
+    expect(getOverride(s, "A")).toEqual({ bpm: 92, detectedBpm: 145 });
     clearStoredBpm(s, "A");
-    expect(getOverride(s, "A")).toBeUndefined(); // only bpm existed -> entry dropped
+    expect(getOverride(s, "A")).toEqual({ detectedBpm: 145 }); // manual gone, detected kept
+  });
+
+  it("drops the entry on clear when nothing else remains", () => {
+    const s = memStore();
+    setStoredBpm(s, "A", 128); // manual only, no detected
+    clearStoredBpm(s, "A");
+    expect(getOverride(s, "A")).toBeUndefined();
 
     setStoredBpm(s, "B", 128);
     flipDoubleTime(s, "B", false); // -> true
     clearStoredBpm(s, "B");
-    expect(getOverride(s, "B")).toEqual({ doubleTime: true }); // bpm gone, flag kept
+    expect(getOverride(s, "B")).toEqual({ doubleTime: true }); // flag kept
   });
 
   it("removes an entry by id", () => {

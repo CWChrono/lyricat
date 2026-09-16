@@ -14,8 +14,10 @@ export const MAX_DELAY_MS = 500;
 export interface TrackOverride {
   /** Human-readable "Song - Artist", stored for readability in the whitelist. */
   name?: string;
-  /** Tempo resolved out-of-band (e.g. from the preview analysis) in BPM. */
+  /** Manual BPM override; authoritative for playback when set. */
   bpm?: number;
+  /** The auto-detected BPM, preserved even after a manual override so it can be reset to. */
+  detectedBpm?: number;
   /** true = treat as double-time (halve), false = trust the raw tempo. */
   doubleTime?: boolean;
   /** Manual sync offset in ms [0, MAX_DELAY_MS] applied before the cat restarts. */
@@ -50,9 +52,10 @@ export function readOverrides(store: KeyValueStore): Record<string, TrackOverrid
         out[id] = { doubleTime: value }; // legacy format
       } else if (value && typeof value === "object") {
         const entry: TrackOverride = {};
-        const { name, bpm, doubleTime, delayMs } = value as TrackOverride;
+        const { name, bpm, detectedBpm, doubleTime, delayMs } = value as TrackOverride;
         if (typeof name === "string" && name) entry.name = name;
         if (isBpm(bpm)) entry.bpm = bpm;
+        if (isBpm(detectedBpm)) entry.detectedBpm = detectedBpm;
         if (typeof doubleTime === "boolean") entry.doubleTime = doubleTime;
         if (isDelay(delayMs)) entry.delayMs = clampDelay(delayMs);
         out[id] = entry;
@@ -80,6 +83,7 @@ function writeOverride(
   const ordered: TrackOverride = {};
   if (merged.name !== undefined) ordered.name = merged.name;
   if (merged.bpm !== undefined) ordered.bpm = merged.bpm;
+  if (merged.detectedBpm !== undefined) ordered.detectedBpm = merged.detectedBpm;
   if (merged.doubleTime !== undefined) ordered.doubleTime = merged.doubleTime;
   if (merged.delayMs !== undefined) ordered.delayMs = merged.delayMs;
   all[id] = ordered;
@@ -124,21 +128,30 @@ export function matchByName(store: KeyValueStore, pattern: string): string[] {
     .map(([id]) => id);
 }
 
-/** Persist a resolved tempo for a track (e.g. from the preview analysis). */
+/** Persist a manual BPM override for a track (authoritative for playback). */
 export function setStoredBpm(store: KeyValueStore, id: string, bpm: number): void {
   if (isBpm(bpm)) writeOverride(store, id, { bpm });
 }
 
+/** Persist the auto-detected BPM for a track (kept even when bpm is overridden). */
+export function setDetectedBpm(store: KeyValueStore, id: string, bpm: number): void {
+  if (isBpm(bpm)) writeOverride(store, id, { detectedBpm: bpm });
+}
+
 /**
- * Drop a track's stored bpm (reverting it to auto-detection). Removes the whole
- * entry if nothing meaningful (double-time / delay) remains.
+ * Drop a track's manual bpm override (reverting playback to the detected bpm).
+ * Removes the whole entry if nothing meaningful remains.
  */
 export function clearStoredBpm(store: KeyValueStore, id: string): void {
   const all = readOverrides(store);
   const entry = all[id];
   if (!entry || entry.bpm === undefined) return;
   delete entry.bpm;
-  if (entry.doubleTime === undefined && entry.delayMs === undefined) {
+  if (
+    entry.detectedBpm === undefined &&
+    entry.doubleTime === undefined &&
+    entry.delayMs === undefined
+  ) {
     delete all[id]; // only a name (or nothing) left
   } else {
     all[id] = entry;

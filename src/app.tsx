@@ -24,6 +24,7 @@ import {
   readOverrides,
   getOverride,
   setStoredBpm,
+  setDetectedBpm,
   clearStoredBpm,
   setDelayMs,
   setTrackName,
@@ -103,7 +104,10 @@ const VIDEO_SOURCE_FIELD = "catjam-video-source";
 const BONGO_DEFAULT_BPM = 600;
 const BONGO_MIN_RATE = 0.1;
 const BONGO_MAX_RATE = 0.35;
-const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(17px);";
+// Nudge into place and force it above every overlay (max z-index). `position`
+// is added per-slot in mountVideo so z-index applies without breaking the
+// absolutely-positioned left-library layout.
+const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(17px); z-index: 2147483647;";
 
 function currentSource(): string {
   return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
@@ -293,60 +297,107 @@ const FIELD_STYLE =
   "background: var(--spice-main, rgba(0,0,0,.3)); color: var(--spice-text, #fff);";
 
 /**
- * Search-and-remove widget: a text box filters the whitelist as you type, a
- * dropdown lists the matches, and the button deletes the selected one — all in
- * one row. `host` is re-rendered after a deletion to refresh the list + preview.
+ * Resolve the removal field to a track id: the id trailing a chosen "Name · id"
+ * option, a pasted id/uri/url, or a single name match. Null if unresolved.
+ */
+function resolveRemovalTarget(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  const trailing = t.match(/([A-Za-z0-9]{22})\s*$/); // id embedded in a chosen option
+  if (trailing && getOverride(overridesStore, trailing[1])) return trailing[1];
+  const direct = parseTrackId(t);
+  if (direct && getOverride(overridesStore, direct)) return direct;
+  const ids = matchByName(overridesStore, t);
+  return ids.length === 1 ? ids[0] : null;
+}
+
+/** Show an "are you sure" prompt, running onConfirm only if the user confirms. */
+function confirmRemove(label: string, onConfirm: () => void): void {
+  const box = document.createElement("div");
+  const msg = document.createElement("p");
+  msg.textContent = `Are you sure you want to remove "${label}" from the whitelist?`;
+  msg.setAttribute("style", "margin: 0 0 16px;");
+  const buttons = document.createElement("div");
+  buttons.setAttribute("style", "display: flex; gap: 8px; justify-content: flex-end;");
+  buttons.append(
+    whitelistButton("Cancel", () => Spicetify.PopupModal.hide()),
+    whitelistButton("Remove", () => {
+      Spicetify.PopupModal.hide();
+      onConfirm();
+    })
+  );
+  box.append(msg, buttons);
+  Spicetify.PopupModal.display({ title: "Cat-Jam", content: box });
+}
+
+/**
+ * Type-to-search removal: a combobox (datalist) filters the whitelist as you
+ * type; "Remove selected" confirms, then deletes the chosen entry. `host` is
+ * re-rendered afterwards to refresh the list + preview.
  */
 function buildRemovalWidget(host: HTMLElement): HTMLElement {
+  const container = document.createElement("div");
+
   const row = document.createElement("div");
-  row.setAttribute("style", "display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 10px;");
+  row.setAttribute("style", "display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px;");
 
-  const search = document.createElement("input");
-  search.type = "text";
-  search.placeholder = "Search whitelist to remove (name or id)…";
-  search.value = whitelistSearch;
-  search.setAttribute("style", `flex: 1 1 160px; ${FIELD_STYLE}`);
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Type a song name or id to remove…";
+  input.value = whitelistSearch;
+  input.setAttribute("list", "catjam-wl-options");
+  input.setAttribute("style", `flex: 1 1 260px; ${FIELD_STYLE}`);
 
-  const select = document.createElement("select");
-  select.setAttribute("style", `flex: 2 1 220px; ${FIELD_STYLE}`);
+  const options = document.createElement("datalist");
+  options.id = "catjam-wl-options";
+  for (const m of searchWhitelist("")) {
+    const opt = document.createElement("option");
+    opt.value = m.label; // "Name · id" — the browser filters these as you type
+    options.appendChild(opt);
+  }
+
+  // The selected entry's stored data, shown under the search once resolved.
+  const selectedInfo = document.createElement("pre");
+  selectedInfo.setAttribute(
+    "style",
+    "margin: 0 0 10px; padding: 8px 12px; font-family: var(--font-mono, monospace); font-size: 12px; " +
+      "line-height: 1.5; background: var(--spice-card, rgba(255,255,255,.05)); border-radius: 8px; " +
+      "white-space: pre-wrap; word-break: break-all; display: none;"
+  );
+  const updateSelected = (): void => {
+    const id = resolveRemovalTarget(input.value);
+    const entry = id ? getOverride(overridesStore, id) : undefined;
+    if (id && entry) {
+      selectedInfo.textContent = `${entry.name ?? id} — ${id}\n${JSON.stringify(entry, null, 2)}`;
+      selectedInfo.style.display = "block";
+    } else {
+      selectedInfo.style.display = "none";
+    }
+  };
+  input.oninput = () => {
+    whitelistSearch = input.value;
+    updateSelected();
+  };
+  updateSelected();
 
   const remove = whitelistButton("Remove selected", () => {
-    const id = select.value;
+    const id = resolveRemovalTarget(input.value);
     if (!id) {
-      Spicetify.showNotification("Cat-Jam: no entry selected", true);
+      Spicetify.showNotification("Cat-Jam: pick a track from the list first", true);
       return;
     }
     const name = getOverride(overridesStore, id)?.name ?? id;
-    removeOverride(overridesStore, id);
-    Spicetify.showNotification(`Cat-Jam: removed ${name}`);
-    renderWhitelistInto(host);
+    confirmRemove(name, () => {
+      removeOverride(overridesStore, id);
+      whitelistSearch = "";
+      Spicetify.showNotification(`Cat-Jam: removed ${name}`);
+      renderWhitelistInto(host);
+    });
   });
 
-  const fill = (): void => {
-    const matches = searchWhitelist(whitelistSearch);
-    select.textContent = "";
-    if (matches.length === 0) {
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(no matches)";
-      select.appendChild(opt);
-      return;
-    }
-    for (const m of matches) {
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      opt.textContent = m.label;
-      select.appendChild(opt);
-    }
-  };
-  search.oninput = () => {
-    whitelistSearch = search.value;
-    fill();
-  };
-  fill();
-
-  row.append(search, select, remove);
-  return row;
+  row.append(input, options, remove);
+  container.append(row, selectedInfo);
+  return container;
 }
 
 /** Render the whitelist preview into an injected section (current song or full list). */
@@ -393,6 +444,7 @@ async function refreshNowPlaying(): Promise<void> {
   const a = await analyze(uri!);
   if (spotifyIdFromUri(Spicetify.Player.data?.item?.uri) !== id) return; // track changed
   nowPlayingBpm = { id, bpm: a?.tempoBpm ?? undefined };
+  syncBpmField(); // the field can now show the resolved (detected) value
   host = document.getElementById(WHITELIST_VIEW_ID);
   if (host) renderWhitelistInto(host);
 }
@@ -451,10 +503,11 @@ function syncDelaySlider(): void {
   writeDelayDisplays(id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0);
 }
 
-/** Point the manual-BPM field at the current song's stored bpm (blank if none). */
+/** Point the manual-BPM field at the current song's effective bpm (manual, else detected). */
 function syncBpmField(): void {
   const id = spotifyIdFromUri(Spicetify.Player.data?.item?.uri);
-  const bpm = id ? getOverride(overridesStore, id)?.bpm : undefined;
+  const o = id ? getOverride(overridesStore, id) : undefined;
+  const bpm = o?.bpm ?? o?.detectedBpm ?? (nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined);
   const value = bpm ? String(Math.round(bpm)) : "";
   settings.setFieldValue(BPM_FIELD, value);
   const el = document.getElementById(`${SETTINGS_ID}.${BPM_FIELD}`) as HTMLInputElement | null;
@@ -476,7 +529,11 @@ async function mountVideo(): Promise<HTMLVideoElement | null> {
     ? "width: 65px; height: 65px;"
     : `width: ${leftSize}%; max-width: 300px; height: auto; max-height: 100%; position: absolute; bottom: 0; pointer-events: none; z-index: 1;`;
   const style =
-    currentSource() === VIDEO_SOURCES.BONGO ? `${baseStyle} ${BONGO_EXTRA_STYLE}` : baseStyle;
+    currentSource() === VIDEO_SOURCES.BONGO
+      ? // bottom-player slot is statically positioned, so add position:relative
+        // there for z-index to take effect; the left library is already absolute.
+        `${baseStyle} ${BONGO_EXTRA_STYLE}${isBottomPlayer ? " position: relative;" : ""}`
+      : baseStyle;
 
   const video = document.createElement("video");
   video.id = VIDEO_ID;
@@ -538,18 +595,20 @@ async function main() {
   const liveFetch = createAnalysisFetcher((url) => fetch(url), sleep);
   const resolveAnalysis = async (uri: string): Promise<AnalysisResult | null> => {
     const id = spotifyIdFromUri(uri);
-    // 1) A stored bpm (manual override, or a cached preview result) always wins.
-    const stored = id ? getOverride(overridesStore, id)?.bpm : undefined;
-    if (stored) return { tempoBpm: stored };
+    const o = id ? getOverride(overridesStore, id) : undefined;
+    // 1) Manual override wins; else a cached detected value (preview result).
+    const effective = o?.bpm ?? o?.detectedBpm;
+    if (effective) return { tempoBpm: effective };
     // 2) ReccoBeats id lookup (Spotify's tempo) covers most tracks.
     const live = await liveFetch(uri);
     if (live?.tempoBpm) return live;
     if (!id) return live;
-    // 3) Missing from ReccoBeats: analyse the 30s preview once (rough), persist it.
+    // 3) Missing from ReccoBeats: analyse the 30s preview once (rough), cache it
+    //    as the detected value.
     const label = labelFor(uri); // capture now; the current track may change during analysis
     const bpm = await fetchTempoViaPreview(id, previewDeps);
     if (bpm) {
-      setStoredBpm(overridesStore, id, bpm);
+      setDetectedBpm(overridesStore, id, bpm);
       if (label) setTrackName(overridesStore, id, label);
       return { tempoBpm: bpm };
     }
@@ -644,10 +703,10 @@ async function main() {
     { min: "0", max: String(MAX_DELAY_MS), step: "1" }
   );
   // Manual BPM override: authoritative over detection (accurate for songs the
-  // preview analysis gets wrong). Blank clears it back to auto-detection.
+  // preview analysis gets wrong). Blank clears it back to the detected value.
   settings.addInput(
     BPM_FIELD,
-    "Set exact BPM for the current song (blank = auto-detect)",
+    "Set exact BPM for the current song (blank = use detected)",
     "",
     () => {
       const uri = Spicetify.Player.data?.item?.uri;
@@ -655,6 +714,12 @@ async function main() {
       if (!id) return;
       const value = Number(settings.getFieldValue(BPM_FIELD));
       if (value > 0 && Number.isFinite(value)) {
+        // Preserve the detected value the first time it's overridden, so it can
+        // be reset to later.
+        const existing = getOverride(overridesStore, id);
+        if (existing?.detectedBpm === undefined && nowPlayingBpm.id === id && nowPlayingBpm.bpm) {
+          setDetectedBpm(overridesStore, id, nowPlayingBpm.bpm);
+        }
         setStoredBpm(overridesStore, id, value);
         recordName(uri, id);
       } else {
@@ -664,6 +729,20 @@ async function main() {
     },
     "number",
     { min: "0", max: "400", step: "1" }
+  );
+  settings.addButton(
+    "catjam-reset-bpm",
+    "Reset the exact BPM back to the auto-detected value",
+    "Reset BPM to detected",
+    () => {
+      const uri = Spicetify.Player.data?.item?.uri;
+      const id = spotifyIdFromUri(uri);
+      if (!id) return;
+      clearStoredBpm(overridesStore, id);
+      controller.onSongChange(uri!, playerState());
+      syncBpmField();
+      void refreshNowPlaying();
+    }
   );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();
