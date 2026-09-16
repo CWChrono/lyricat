@@ -3,6 +3,7 @@ import {
   readOverrides,
   getOverride,
   setStoredBpm,
+  clearStoredBpm,
   setDelayMs,
   setTrackName,
   flipDoubleTime,
@@ -72,6 +73,18 @@ describe("overrides", () => {
     setDelayMs(s, "A", 9999);
     setStoredBpm(s, "A", 0); // invalid, ignored
     expect(getOverride(s, "A")).toEqual({ delayMs: 500 });
+  });
+
+  it("clears a stored bpm, dropping the entry when nothing else remains", () => {
+    const s = memStore();
+    setStoredBpm(s, "A", 128);
+    clearStoredBpm(s, "A");
+    expect(getOverride(s, "A")).toBeUndefined(); // only bpm existed -> entry dropped
+
+    setStoredBpm(s, "B", 128);
+    flipDoubleTime(s, "B", false); // -> true
+    clearStoredBpm(s, "B");
+    expect(getOverride(s, "B")).toEqual({ doubleTime: true }); // bpm gone, flag kept
   });
 
   it("removes an entry by id", () => {

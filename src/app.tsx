@@ -24,6 +24,7 @@ import {
   readOverrides,
   getOverride,
   setStoredBpm,
+  clearStoredBpm,
   setDelayMs,
   setTrackName,
   flipDoubleTime,
@@ -81,6 +82,7 @@ const OBSERVER_TIMEOUT_MS = 30_000;
 const SETTINGS_ID = "catjam-settings";
 const DELAY_FIELD = "catjam-delay"; // coarse slider
 const DELAY_TEXT_FIELD = "catjam-delay-ms"; // fine-tune number input
+const BPM_FIELD = "catjam-set-bpm"; // manual BPM override
 
 const settings = new SettingsSection("Cat-Jam Settings", SETTINGS_ID);
 
@@ -421,6 +423,16 @@ function syncDelaySlider(): void {
   writeDelayDisplays(id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0);
 }
 
+/** Point the manual-BPM field at the current song's stored bpm (blank if none). */
+function syncBpmField(): void {
+  const id = spotifyIdFromUri(Spicetify.Player.data?.item?.uri);
+  const bpm = id ? getOverride(overridesStore, id)?.bpm : undefined;
+  const value = bpm ? String(Math.round(bpm)) : "";
+  settings.setFieldValue(BPM_FIELD, value);
+  const el = document.getElementById(`${SETTINGS_ID}.${BPM_FIELD}`) as HTMLInputElement | null;
+  if (el) el.value = value;
+}
+
 /** Mounts the video into the first available container; null if UI changed shape. */
 async function mountVideo(): Promise<HTMLVideoElement | null> {
   const existing = document.getElementById(VIDEO_ID);
@@ -497,14 +509,15 @@ async function main() {
   // back to a stored value (from the preview analysis run via the buttons).
   const liveFetch = createAnalysisFetcher((url) => fetch(url), sleep);
   const fetchAnalysis = async (uri: string): Promise<AnalysisResult | null> => {
+    const id = spotifyIdFromUri(uri);
+    // 1) A stored bpm (manual override, or a cached preview result) always wins.
+    const stored = id ? getOverride(overridesStore, id)?.bpm : undefined;
+    if (stored) return { tempoBpm: stored };
+    // 2) ReccoBeats id lookup (Spotify's tempo) covers most tracks.
     const live = await liveFetch(uri);
     if (live?.tempoBpm) return live;
-    const id = spotifyIdFromUri(uri);
     if (!id) return live;
-    const stored = getOverride(overridesStore, id)?.bpm;
-    if (stored) return { tempoBpm: stored };
-    // Missing from ReccoBeats' id DB: analyse the 30s preview once, persist it,
-    // so subsequent plays use the stored value instead of re-analysing.
+    // 3) Missing from ReccoBeats: analyse the 30s preview once (rough), persist it.
     const label = labelFor(uri); // capture now; the current track may change during analysis
     const bpm = await fetchTempoViaPreview(id, previewDeps);
     if (bpm) {
@@ -590,6 +603,28 @@ async function main() {
     "number",
     { min: "0", max: String(MAX_DELAY_MS), step: "1" }
   );
+  // Manual BPM override: authoritative over detection (accurate for songs the
+  // preview analysis gets wrong). Blank clears it back to auto-detection.
+  settings.addInput(
+    BPM_FIELD,
+    "Set exact BPM for the current song (blank = auto-detect)",
+    "",
+    () => {
+      const uri = Spicetify.Player.data?.item?.uri;
+      const id = spotifyIdFromUri(uri);
+      if (!id) return;
+      const value = Number(settings.getFieldValue(BPM_FIELD));
+      if (value > 0 && Number.isFinite(value)) {
+        setStoredBpm(overridesStore, id, value);
+        recordName(uri, id);
+      } else {
+        clearStoredBpm(overridesStore, id);
+      }
+      controller.onSongChange(uri!, playerState());
+    },
+    "number",
+    { min: "0", max: "400", step: "1" }
+  );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();
   });
@@ -622,6 +657,7 @@ async function main() {
     }
     controller.onSongChange(Spicetify.Player.data?.item?.uri, playerState());
     syncDelaySlider(); // show the new song's stored delay in the slider
+    syncBpmField(); // show the new song's manual bpm override (if any)
     const host = document.getElementById(WHITELIST_VIEW_ID);
     if (host) renderWhitelistInto(host); // keep the preview on the now-playing song
   });

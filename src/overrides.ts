@@ -129,6 +129,23 @@ export function setStoredBpm(store: KeyValueStore, id: string, bpm: number): voi
   if (isBpm(bpm)) writeOverride(store, id, { bpm });
 }
 
+/**
+ * Drop a track's stored bpm (reverting it to auto-detection). Removes the whole
+ * entry if nothing meaningful (double-time / delay) remains.
+ */
+export function clearStoredBpm(store: KeyValueStore, id: string): void {
+  const all = readOverrides(store);
+  const entry = all[id];
+  if (!entry || entry.bpm === undefined) return;
+  delete entry.bpm;
+  if (entry.doubleTime === undefined && entry.delayMs === undefined) {
+    delete all[id]; // only a name (or nothing) left
+  } else {
+    all[id] = entry;
+  }
+  store.set(STORAGE_KEY, JSON.stringify(all));
+}
+
 /** Persist a manual sync delay (ms) for a track, clamped to [0, MAX_DELAY_MS]. */
 export function setDelayMs(store: KeyValueStore, id: string, ms: number): void {
   writeOverride(store, id, { delayMs: clampDelay(ms) });
