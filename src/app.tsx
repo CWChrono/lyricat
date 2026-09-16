@@ -28,6 +28,8 @@ import {
   setDelayMs,
   setTrackName,
   flipDoubleTime,
+  removeOverride,
+  matchByName,
   clampDelay,
   MAX_DELAY_MS,
 } from "./overrides";
@@ -220,31 +222,101 @@ async function toggleDoubleTime(
 }
 
 const WHITELIST_VIEW_ID = "catjam-whitelist-view";
+const REMOVE_FIELD = "catjam-remove-id";
 
-/** Render the whitelist JSON (scrollable, selectable) into an injected section. */
+/** Extract a base-62 track id from a raw id, spotify: uri, or open.spotify URL. */
+function parseTrackId(input: string): string | null {
+  const s = input.trim();
+  const uriId = spotifyIdFromUri(s);
+  if (uriId) return uriId;
+  const url = s.match(/track[/:]([A-Za-z0-9]{22})/); // open.spotify.com/track/ID
+  if (url) return url[1];
+  if (/^[A-Za-z0-9]{22}$/.test(s)) return s; // bare id
+  return null;
+}
+
+/** Remove-field action: delete by track id/URL, else by best-effort name regex. */
+function removeFromWhitelist(): void {
+  const raw = String(settings.getFieldValue(REMOVE_FIELD) || "").trim();
+  if (!raw) {
+    Spicetify.showNotification("Cat-Jam: enter a track id, URL, or song name", true);
+    return;
+  }
+  const id = parseTrackId(raw);
+  if (id) {
+    const removed = removeOverride(overridesStore, id);
+    Spicetify.showNotification(
+      removed ? `Cat-Jam: removed ${id}` : `Cat-Jam: ${id} not in whitelist`,
+      !removed
+    );
+  } else {
+    const ids = matchByName(overridesStore, raw);
+    if (ids.length === 0) {
+      Spicetify.showNotification(`Cat-Jam: no whitelist names match "${raw}"`, true);
+      return;
+    }
+    const names = ids.map((i) => getOverride(overridesStore, i)?.name ?? i);
+    ids.forEach((i) => removeOverride(overridesStore, i));
+    Spicetify.showNotification(`Cat-Jam: removed ${ids.length} — ${names.join(", ")}`);
+  }
+  settings.setFieldValue(REMOVE_FIELD, "");
+  settings.rerender();
+  void mountWhitelistPreview(); // refresh the inline preview
+}
+
+// The preview defaults to the now-playing track's own entry; the full JSON
+// list is available on demand.
+let whitelistShowFull = false;
+
+function whitelistPreviewText(): string {
+  if (whitelistShowFull) {
+    const map = readOverrides(overridesStore);
+    return Object.keys(map).length
+      ? JSON.stringify(map, null, 2)
+      : "{}\n\n(empty — play some songs, or use Check BPM / Toggle double-time)";
+  }
+  const item = Spicetify.Player.data?.item;
+  const id = spotifyIdFromUri(item?.uri);
+  if (!id) return "No Spotify track playing.";
+  const entry = getOverride(overridesStore, id);
+  const head = `${item?.name ?? "Current track"} — ${id}\n\n`;
+  return head + (entry ? JSON.stringify(entry, null, 2) : "(not in whitelist yet)");
+}
+
+function whitelistButton(label: string, onClick: () => void): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.textContent = label;
+  button.setAttribute(
+    "style",
+    "margin: 4px 8px 8px 0; padding: 4px 14px; border-radius: 16px; cursor: pointer; " +
+      "border: 1px solid var(--spice-button-disabled, #555); background: transparent; " +
+      "color: var(--spice-text, #fff);"
+  );
+  button.onclick = onClick;
+  return button;
+}
+
+/** Render the whitelist preview into an injected section (current song or full list). */
 function renderWhitelistInto(host: HTMLElement): void {
-  const map = readOverrides(overridesStore);
-  const json = Object.keys(map).length
-    ? JSON.stringify(map, null, 2)
-    : "{}\n\n(empty — play some songs, or use Check BPM / Toggle double-time)";
   host.textContent = "";
 
   const heading = document.createElement("h2");
   heading.className = "TypeElement-cello-textBase-type";
-  heading.textContent = "Cat-Jam Whitelist";
+  heading.textContent = whitelistShowFull
+    ? "Cat-Jam Whitelist — full list"
+    : "Cat-Jam Whitelist — now playing";
 
-  const refresh = document.createElement("button");
-  refresh.textContent = "Refresh";
-  refresh.setAttribute(
-    "style",
-    "margin: 4px 0 8px; padding: 4px 14px; border-radius: 16px; cursor: pointer; " +
-      "border: 1px solid var(--spice-button-disabled, #555); background: transparent; " +
-      "color: var(--spice-text, #fff);"
+  const toggle = whitelistButton(
+    whitelistShowFull ? "Show current song" : "Show full list",
+    () => {
+      whitelistShowFull = !whitelistShowFull;
+      renderWhitelistInto(host);
+    }
   );
-  refresh.onclick = () => renderWhitelistInto(host);
+  const refresh = whitelistButton("Refresh", () => renderWhitelistInto(host));
 
   const pre = document.createElement("pre");
-  pre.textContent = json;
+  pre.textContent = whitelistPreviewText();
   pre.setAttribute(
     "style",
     "max-height: 40vh; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0; " +
@@ -252,7 +324,7 @@ function renderWhitelistInto(host: HTMLElement): void {
       "background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; user-select: text;"
   );
 
-  host.append(heading, refresh, pre);
+  host.append(heading, toggle, refresh, pre);
 }
 
 /** Inject the preview as a sibling right after the Cat-Jam settings section. */
@@ -469,6 +541,19 @@ async function main() {
       void toggleDoubleTime(fetchAnalysis, controller);
     }
   );
+  settings.addInput(
+    REMOVE_FIELD,
+    "Remove from whitelist — track id / URL, or song name (regex)",
+    ""
+  );
+  settings.addButton(
+    "catjam-remove",
+    "Delete the whitelist entry matching the field above",
+    "Remove from whitelist",
+    () => {
+      removeFromWhitelist();
+    }
+  );
   void settings.pushSettings();
   void setupWhitelistPreview(); // inject the scrollable whitelist below the settings
 
@@ -480,6 +565,8 @@ async function main() {
     }
     controller.onSongChange(Spicetify.Player.data?.item?.uri, playerState());
     syncDelaySlider(); // show the new song's stored delay in the slider
+    const host = document.getElementById(WHITELIST_VIEW_ID);
+    if (host) renderWhitelistInto(host); // keep the preview on the now-playing song
   });
 
   Spicetify.Player.addEventListener("onplaypause", () => {

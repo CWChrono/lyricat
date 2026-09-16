@@ -6,6 +6,8 @@ import {
   setDelayMs,
   setTrackName,
   flipDoubleTime,
+  removeOverride,
+  matchByName,
   clampDelay,
   KeyValueStore,
 } from "./overrides";
@@ -70,6 +72,26 @@ describe("overrides", () => {
     setDelayMs(s, "A", 9999);
     setStoredBpm(s, "A", 0); // invalid, ignored
     expect(getOverride(s, "A")).toEqual({ delayMs: 500 });
+  });
+
+  it("removes an entry by id", () => {
+    const s = memStore();
+    setStoredBpm(s, "A", 120);
+    expect(removeOverride(s, "A")).toBe(true);
+    expect(getOverride(s, "A")).toBeUndefined();
+    expect(removeOverride(s, "A")).toBe(false); // already gone
+  });
+
+  it("matches entries by name via regex, case-insensitive, with substring fallback", () => {
+    const s = memStore();
+    setTrackName(s, "A", "War - keshi");
+    setTrackName(s, "B", "Heavenmade - JHIN");
+    setTrackName(s, "C", "venus - Regina Song");
+    expect(matchByName(s, "keshi")).toEqual(["A"]);
+    expect(matchByName(s, "VENUS")).toEqual(["C"]); // case-insensitive
+    expect(matchByName(s, "war|jhin")).toEqual(["A", "B"]); // regex alternation
+    expect(matchByName(s, "(")).toEqual([]); // invalid regex -> substring, no match
+    expect(matchByName(s, "nope")).toEqual([]);
   });
 
   it("migrates the legacy boolean format and survives corrupt storage", () => {

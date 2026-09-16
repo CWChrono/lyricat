@@ -92,6 +92,38 @@ export function setTrackName(store: KeyValueStore, id: string, name: string): vo
   if (name) writeOverride(store, id, { name });
 }
 
+/** Delete a track's entry from the whitelist. Returns true if one was removed. */
+export function removeOverride(store: KeyValueStore, id: string): boolean {
+  const all = readOverrides(store);
+  if (!(id in all)) return false;
+  delete all[id];
+  store.set(STORAGE_KEY, JSON.stringify(all));
+  return true;
+}
+
+/**
+ * Best-effort search of whitelist entries by their stored name. `pattern` is
+ * treated as a case-insensitive regex, falling back to a substring match if it
+ * isn't valid regex. Returns the matching track ids.
+ */
+export function matchByName(store: KeyValueStore, pattern: string): string[] {
+  const map = readOverrides(store);
+  let re: RegExp | null = null;
+  try {
+    re = new RegExp(pattern, "i");
+  } catch {
+    re = null;
+  }
+  const needle = pattern.toLowerCase();
+  return Object.entries(map)
+    .filter(
+      ([, o]) =>
+        typeof o.name === "string" &&
+        (re ? re.test(o.name) : o.name.toLowerCase().includes(needle))
+    )
+    .map(([id]) => id);
+}
+
 /** Persist a resolved tempo for a track (e.g. from the preview analysis). */
 export function setStoredBpm(store: KeyValueStore, id: string, bpm: number): void {
   if (isBpm(bpm)) writeOverride(store, id, { bpm });
