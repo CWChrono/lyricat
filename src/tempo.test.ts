@@ -55,6 +55,14 @@ describe("computePlaybackRate", () => {
     expect(computePlaybackRate(135.48, 0)).toBeCloseTo(1);
   });
 
+  it("honours per-source clamp bounds (e.g. bongo: videoBpm 600, [0.1, 0.35])", () => {
+    expect(computePlaybackRate(120, 600, undefined, 0.1, 0.35)).toBeCloseTo(0.2);
+    expect(computePlaybackRate(40, 600, undefined, 0.1, 0.35)).toBeCloseTo(0.1); // clamped up
+    // no-tempo fallback is clamped into the source range, not a bare 1
+    expect(computePlaybackRate(null, 600, undefined, 0.1, 0.35)).toBeCloseTo(0.35);
+    expect(computePlaybackRate(null, 135.48)).toBeCloseTo(1); // cat unchanged
+  });
+
   it("honours a manual double-time override over the auto fold", () => {
     // true forces a halve even below the ceiling (140 -> 70)
     expect(computePlaybackRate(140, DEFAULT_VIDEO_BPM, true)).toBeCloseTo(70 / 135.48);

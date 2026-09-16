@@ -37,10 +37,14 @@ export function effectiveTempo(bpm: number, doubleTime?: boolean): number {
 export function computePlaybackRate(
   trackTempoBpm: number | null | undefined,
   videoDefaultBpm: number,
-  doubleTime?: boolean
+  doubleTime?: boolean,
+  minRate: number = MIN_RATE,
+  maxRate: number = MAX_RATE
 ): number {
   const video = validBpm(videoDefaultBpm) ? videoDefaultBpm : DEFAULT_VIDEO_BPM;
-  if (!validBpm(trackTempoBpm)) return 1;
-  const rate = effectiveTempo(trackTempoBpm, doubleTime) / video;
-  return Math.min(MAX_RATE, Math.max(MIN_RATE, rate));
+  const clamp = (rate: number) => Math.min(maxRate, Math.max(minRate, rate));
+  // No tempo: fall back to the video's native rate, clamped into the source's
+  // range (1 for the cat; the ceiling keeps fast-looping videos like bongo sane).
+  if (!validBpm(trackTempoBpm)) return clamp(1);
+  return clamp(effectiveTempo(trackTempoBpm, doubleTime) / video);
 }

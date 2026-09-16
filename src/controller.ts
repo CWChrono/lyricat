@@ -9,6 +9,9 @@ export interface AnalysisResult {
 export interface CatJamConfig {
   videoUrl: string;
   defaultBpm: number;
+  /** Per-source playback-rate clamp; defaults to the cat's [0.5, 2] when omitted. */
+  minRate?: number;
+  maxRate?: number;
 }
 
 /** Player snapshot at the time of an event. */
@@ -114,10 +117,13 @@ export class CatJamController {
     const doubleTime = this.currentUri
       ? this.deps.getDoubleTime?.(this.currentUri)
       : undefined;
+    const cfg = this.deps.getConfig();
     this.video.playbackRate = computePlaybackRate(
       this.tempoBpm,
-      this.deps.getConfig().defaultBpm,
-      doubleTime
+      cfg.defaultBpm,
+      doubleTime,
+      cfg.minRate,
+      cfg.maxRate
     );
   }
 

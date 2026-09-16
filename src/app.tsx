@@ -71,19 +71,34 @@ const VIDEO_SOURCES = {
 } as const;
 const VIDEO_SOURCE_FIELD = "catjam-video-source";
 
-/** Which video to show, based on the source dropdown. */
-function selectedVideoUrl(): string {
-  const source = String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
-  if (source === VIDEO_SOURCES.BONGO) return BONGOCAT_VIDEO_URL;
-  if (source === VIDEO_SOURCES.CUSTOM) {
-    return String(settings.getFieldValue("catjam-webm-link") || "") || DEFAULT_VIDEO_URL;
-  }
-  return DEFAULT_VIDEO_URL;
+// Bongo Cat is a 2-frame loop of 200 ms (10 fps), so at rate 1 the paws flap
+// 600×/min. A video BPM of 600 makes each frame land on a beat, and its rates
+// (~0.1–0.25) need a lower clamp than the cat's. Extra style nudges him into
+// place (a little right padding, and down out of the way of the player text).
+const BONGO_DEFAULT_BPM = 600;
+const BONGO_MIN_RATE = 0.1;
+const BONGO_MAX_RATE = 0.35;
+const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(30px);";
+
+function currentSource(): string {
+  return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
 }
 
 function getConfig(): CatJamConfig {
+  if (currentSource() === VIDEO_SOURCES.BONGO) {
+    return {
+      videoUrl: BONGOCAT_VIDEO_URL,
+      defaultBpm: BONGO_DEFAULT_BPM,
+      minRate: BONGO_MIN_RATE,
+      maxRate: BONGO_MAX_RATE,
+    };
+  }
+  const url =
+    currentSource() === VIDEO_SOURCES.CUSTOM
+      ? String(settings.getFieldValue("catjam-webm-link") || "") || DEFAULT_VIDEO_URL
+      : DEFAULT_VIDEO_URL;
   return {
-    videoUrl: selectedVideoUrl(),
+    videoUrl: url,
     defaultBpm: Number(settings.getFieldValue("catjam-webm-bpm")) || DEFAULT_VIDEO_BPM,
   };
 }
@@ -134,8 +149,9 @@ async function reportCurrentBpm(
   controller.onSongChange(uri!, playerState()); // reflect any newly-stored bpm on the cat
 
   const doubleTime = getOverride(overridesStore, id)?.doubleTime;
+  const cfg = getConfig();
   const felt = effectiveTempo(bpm, doubleTime);
-  const rate = computePlaybackRate(bpm, getConfig().defaultBpm, doubleTime);
+  const rate = computePlaybackRate(bpm, cfg.defaultBpm, doubleTime, cfg.minRate, cfg.maxRate);
   const foldNote = felt < bpm - 0.5 ? ` → ${felt.toFixed(0)} felt` : "";
   const tag = doubleTime !== undefined ? " [manual]" : "";
   Spicetify.showNotification(
@@ -163,7 +179,8 @@ async function toggleDoubleTime(
   }
   const next = flipDoubleTime(overridesStore, id, normalizeTempo(bpm) < bpm);
   controller.onSongChange(uri!, playerState());
-  const rate = computePlaybackRate(bpm, getConfig().defaultBpm, next);
+  const cfg = getConfig();
+  const rate = computePlaybackRate(bpm, cfg.defaultBpm, next, cfg.minRate, cfg.maxRate);
   Spicetify.showNotification(
     `Cat-Jam: ${item?.name ?? "Track"} — double-time ${next ? "ON" : "OFF"} ` +
       `(cat ${rate.toFixed(2)}×)`
@@ -189,9 +206,11 @@ async function mountVideo(): Promise<HTMLVideoElement | null> {
 
   const leftSize =
     Number(settings.getFieldValue("catjam-webm-position-left-size")) || 100;
-  const style = isBottomPlayer
+  const baseStyle = isBottomPlayer
     ? "width: 65px; height: 65px;"
     : `width: ${leftSize}%; max-width: 300px; height: auto; max-height: 100%; position: absolute; bottom: 0; pointer-events: none; z-index: 1;`;
+  const style =
+    currentSource() === VIDEO_SOURCES.BONGO ? `${baseStyle} ${BONGO_EXTRA_STYLE}` : baseStyle;
 
   const video = document.createElement("video");
   video.id = VIDEO_ID;
