@@ -4,6 +4,7 @@ import {
   getOverride,
   setStoredBpm,
   setDelayMs,
+  setTrackName,
   flipDoubleTime,
   clampDelay,
   KeyValueStore,
@@ -50,12 +51,18 @@ describe("overrides", () => {
     expect(flipDoubleTime(s, "C", true)).toBe(true);
   });
 
-  it("stores bpm and delay alongside double-time without clobbering", () => {
+  it("stores name, bpm and delay alongside double-time without clobbering", () => {
     const s = memStore();
     setStoredBpm(s, "A", 128.4);
     flipDoubleTime(s, "A", false); // -> true
     setDelayMs(s, "A", 250);
-    expect(getOverride(s, "A")).toEqual({ bpm: 128.4, doubleTime: true, delayMs: 250 });
+    setTrackName(s, "A", "Venus - Regina Song");
+    expect(getOverride(s, "A")).toEqual({
+      name: "Venus - Regina Song",
+      bpm: 128.4,
+      doubleTime: true,
+      delayMs: 250,
+    });
   });
 
   it("clamps stored delay and ignores invalid bpm", () => {

@@ -12,6 +12,8 @@ export interface KeyValueStore {
 export const MAX_DELAY_MS = 500;
 
 export interface TrackOverride {
+  /** Human-readable "Song - Artist", stored for readability in the whitelist. */
+  name?: string;
   /** Tempo resolved out-of-band (e.g. from the preview analysis) in BPM. */
   bpm?: number;
   /** true = treat as double-time (halve), false = trust the raw tempo. */
@@ -48,7 +50,8 @@ export function readOverrides(store: KeyValueStore): Record<string, TrackOverrid
         out[id] = { doubleTime: value }; // legacy format
       } else if (value && typeof value === "object") {
         const entry: TrackOverride = {};
-        const { bpm, doubleTime, delayMs } = value as TrackOverride;
+        const { name, bpm, doubleTime, delayMs } = value as TrackOverride;
+        if (typeof name === "string" && name) entry.name = name;
         if (isBpm(bpm)) entry.bpm = bpm;
         if (typeof doubleTime === "boolean") entry.doubleTime = doubleTime;
         if (isDelay(delayMs)) entry.delayMs = clampDelay(delayMs);
@@ -72,10 +75,21 @@ function writeOverride(
   patch: TrackOverride
 ): TrackOverride {
   const all = readOverrides(store);
-  const merged = { ...(all[id] ?? {}), ...patch };
-  all[id] = merged;
+  const merged: TrackOverride = { ...(all[id] ?? {}), ...patch };
+  // Reconstruct with a stable, readable field order (name first).
+  const ordered: TrackOverride = {};
+  if (merged.name !== undefined) ordered.name = merged.name;
+  if (merged.bpm !== undefined) ordered.bpm = merged.bpm;
+  if (merged.doubleTime !== undefined) ordered.doubleTime = merged.doubleTime;
+  if (merged.delayMs !== undefined) ordered.delayMs = merged.delayMs;
+  all[id] = ordered;
   store.set(STORAGE_KEY, JSON.stringify(all));
-  return merged;
+  return ordered;
+}
+
+/** Persist the "Song - Artist" label for a track. */
+export function setTrackName(store: KeyValueStore, id: string, name: string): void {
+  if (name) writeOverride(store, id, { name });
 }
 
 /** Persist a resolved tempo for a track (e.g. from the preview analysis). */

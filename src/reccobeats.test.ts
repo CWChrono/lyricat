@@ -149,7 +149,7 @@ describe("fetchTempoViaPreview", () => {
   it("resolves tempo end to end and uploads the preview as 'audioFile'", async () => {
     let uploaded: FormData | undefined;
     const deps: PreviewDeps = {
-      fetchText: vi.fn().mockResolvedValue('{"audioPreview":{"url":"https://p.scdn.co/mp3-preview/x"}}'),
+      getPreviewUrl: vi.fn().mockResolvedValue("https://p.scdn.co/mp3-preview/x"),
       fetchBlob: vi.fn().mockResolvedValue(audio),
       postForm: vi.fn(async (_url: string, form: FormData) => {
         uploaded = form;
@@ -157,13 +157,13 @@ describe("fetchTempoViaPreview", () => {
       }),
     };
     expect(await fetchTempoViaPreview("trackid", deps)).toBeCloseTo(84.9);
-    expect(deps.fetchText).toHaveBeenCalledWith("https://open.spotify.com/embed/track/trackid");
+    expect(deps.getPreviewUrl).toHaveBeenCalledWith("trackid");
     expect(uploaded?.get("audioFile")).toBeInstanceOf(Blob);
   });
 
   it("returns null when the track has no preview", async () => {
     const deps: PreviewDeps = {
-      fetchText: vi.fn().mockResolvedValue("<html>no preview</html>"),
+      getPreviewUrl: vi.fn().mockResolvedValue(null),
       fetchBlob: vi.fn(),
       postForm: vi.fn(),
     };
@@ -173,7 +173,7 @@ describe("fetchTempoViaPreview", () => {
 
   it("swallows transport errors and returns null", async () => {
     const deps: PreviewDeps = {
-      fetchText: vi.fn().mockRejectedValue(new Error("cosmos failed")),
+      getPreviewUrl: vi.fn().mockRejectedValue(new Error("resolve failed")),
       fetchBlob: vi.fn(),
       postForm: vi.fn(),
     };

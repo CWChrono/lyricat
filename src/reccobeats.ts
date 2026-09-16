@@ -7,7 +7,6 @@ import { AnalysisResult } from "./controller";
 // sync but not beat-phase alignment — the controller handles absent beats.
 const AUDIO_FEATURES_ENDPOINT = "https://api.reccobeats.com/v1/audio-features";
 const ANALYSIS_ENDPOINT = "https://api.reccobeats.com/v1/analysis/audio-features";
-const EMBED_BASE = "https://open.spotify.com/embed/track/";
 
 /** Minimal shape of the Fetch API we depend on (injected so it can be tested). */
 export type FetchLike = (
@@ -91,8 +90,8 @@ export function parseAnalysisTempo(body: unknown): number | null {
 
 /** Transports for the preview fallback, injected so the flow stays testable. */
 export interface PreviewDeps {
-  /** Cross-origin GET of the embed HTML (the embed host sends no CORS headers). */
-  fetchText(url: string): Promise<string>;
+  /** Resolve a track's preview mp3 url (client metadata, embed page, etc.). */
+  getPreviewUrl(id: string): Promise<string | null>;
   /** GET the preview bytes (p.scdn.co allows CORS, so plain fetch works). */
   fetchBlob(url: string): Promise<Blob>;
   /** POST the multipart form to the analysis endpoint, returning parsed JSON. */
@@ -103,20 +102,27 @@ export interface PreviewDeps {
  * Resolve a track's tempo by analysing its 30s preview clip. The audio is used
  * only for the request and never stored: the Blob is passed straight into the
  * upload and discarded (no object URL, no caching). Returns null if the track
- * has no preview or the analysis fails.
+ * has no preview or the analysis fails; each failing stage is logged so the
+ * hop that breaks in-app is visible in the console.
  */
 export async function fetchTempoViaPreview(
   id: string,
   deps: PreviewDeps
 ): Promise<number | null> {
   try {
-    const previewUrl = parsePreviewUrl(await deps.fetchText(EMBED_BASE + id));
-    if (!previewUrl) return null;
+    const previewUrl = await deps.getPreviewUrl(id);
+    if (!previewUrl) {
+      console.warn(`[CAT-JAM] preview analysis: no preview url for ${id}`);
+      return null;
+    }
     const audio = await deps.fetchBlob(previewUrl);
     const form = new FormData();
     form.append("audioFile", audio, "preview.mp3");
-    return parseAnalysisTempo(await deps.postForm(ANALYSIS_ENDPOINT, form));
-  } catch {
+    const tempo = parseAnalysisTempo(await deps.postForm(ANALYSIS_ENDPOINT, form));
+    if (tempo === null) console.warn(`[CAT-JAM] preview analysis: no tempo returned for ${id}`);
+    return tempo;
+  } catch (err) {
+    console.warn(`[CAT-JAM] preview analysis failed for ${id}:`, err);
     return null;
   }
 }

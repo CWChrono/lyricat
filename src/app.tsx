@@ -17,6 +17,7 @@ import {
   createAnalysisFetcher,
   spotifyIdFromUri,
   fetchTempoViaPreview,
+  parsePreviewUrl,
   PreviewDeps,
 } from "./reccobeats";
 import {
@@ -25,6 +26,7 @@ import {
   getOverride,
   setStoredBpm,
   setDelayMs,
+  setTrackName,
   flipDoubleTime,
   clampDelay,
   MAX_DELAY_MS,
@@ -37,24 +39,47 @@ const overridesStore: KeyValueStore = {
   set: (key, value) => Spicetify.LocalStorage.set(key, value),
 };
 
-// Transports for the preview-analysis fallback. The embed page has no CORS, so
-// its HTML goes through CosmosAsync; the preview CDN and ReccoBeats allow CORS,
-// so plain fetch handles the audio download and the multipart upload. The audio
-// is streamed straight into the upload and never stored.
-const previewDeps: PreviewDeps = {
-  fetchText: async (url) => {
-    // CosmosAsync.get may try to JSON-parse the HTML; fall back to the raw
-    // request body if it throws or hands back a non-string.
-    try {
-      const body = await Spicetify.CosmosAsync.get(url);
-      if (typeof body === "string" && body) return body;
-    } catch {
-      /* fall through to request */
+/** Best-effort cross-origin GET of text via CosmosAsync (may fail on this client). */
+async function cosmosText(url: string): Promise<string> {
+  try {
+    const body = await Spicetify.CosmosAsync.get(url);
+    if (typeof body === "string" && body) return body;
+  } catch {
+    /* fall through to request */
+  }
+  const res = await Spicetify.CosmosAsync.request("GET", url);
+  const body = (res as { body?: unknown })?.body;
+  return typeof body === "string" ? body : JSON.stringify(body ?? "");
+}
+
+/**
+ * Find a track's 30s preview mp3 url. Tries the client's already-loaded track
+ * metadata first (no network — the reliable hop), then the public embed page
+ * via CosmosAsync (which may be blocked on some clients). Add sources here if a
+ * probe shows another hop works.
+ */
+async function getPreviewUrl(id: string): Promise<string | null> {
+  const item = Spicetify.Player.data?.item as any;
+  if (item && spotifyIdFromUri(item.uri) === id) {
+    const meta = item.metadata ?? {};
+    for (const c of [item.previewUrl, item.preview_url, meta.preview_url, meta.audio_preview_url]) {
+      if (typeof c === "string" && c.startsWith("http")) return c;
     }
-    const res = await Spicetify.CosmosAsync.request("GET", url);
-    const body = (res as { body?: unknown })?.body;
-    return typeof body === "string" ? body : JSON.stringify(body ?? "");
-  },
+  }
+  try {
+    const url = parsePreviewUrl(await cosmosText(`https://open.spotify.com/embed/track/${id}`));
+    if (url) return url;
+  } catch {
+    /* ignore — logged by the caller */
+  }
+  return null;
+}
+
+// The preview CDN and ReccoBeats allow CORS, so plain fetch handles the audio
+// download and multipart upload. The audio is streamed straight into the upload
+// and never stored.
+const previewDeps: PreviewDeps = {
+  getPreviewUrl,
   fetchBlob: (url) => fetch(url).then((r) => r.blob()),
   postForm: (url, form) => fetch(url, { method: "POST", body: form }).then((r) => r.json()),
 };
@@ -120,6 +145,20 @@ function playerState(): PlaybackState {
   };
 }
 
+/** "Song - Artist" for a uri, but only when it is the current track. */
+function labelFor(uri: string | undefined): string | undefined {
+  const item = Spicetify.Player.data?.item;
+  if (!item || item.uri !== uri) return undefined;
+  const artist = item.artists?.[0]?.name;
+  return artist ? `${item.name} - ${artist}` : item.name || undefined;
+}
+
+/** Persist the "Song - Artist" label for a track when we can determine it. */
+function recordName(uri: string | undefined, id: string): void {
+  const label = labelFor(uri);
+  if (label) setTrackName(overridesStore, id, label);
+}
+
 /** Check BPM button: resolve the tempo, apply it, and toast the result. */
 async function reportCurrentBpm(
   fetchAnalysis: (uri: string) => Promise<AnalysisResult | null>,
@@ -170,6 +209,7 @@ async function toggleDoubleTime(
     return;
   }
   const next = flipDoubleTime(overridesStore, id, normalizeTempo(bpm) < bpm);
+  recordName(uri, id);
   controller.onSongChange(uri!, playerState());
   const cfg = getConfig();
   const rate = computePlaybackRate(bpm, cfg.defaultBpm, next, cfg.minRate, cfg.maxRate);
@@ -338,9 +378,11 @@ async function main() {
     if (stored) return { tempoBpm: stored };
     // Missing from ReccoBeats' id DB: analyse the 30s preview once, persist it,
     // so subsequent plays use the stored value instead of re-analysing.
+    const label = labelFor(uri); // capture now; the current track may change during analysis
     const bpm = await fetchTempoViaPreview(id, previewDeps);
     if (bpm) {
       setStoredBpm(overridesStore, id, bpm);
+      if (label) setTrackName(overridesStore, id, label);
       return { tempoBpm: bpm };
     }
     return live; // null — no preview available / analysis failed
@@ -402,6 +444,7 @@ async function main() {
       const id = spotifyIdFromUri(uri);
       if (!id) return;
       setDelayMs(overridesStore, id, clampDelay(Number(settings.getFieldValue(DELAY_FIELD)) || 0));
+      recordName(uri, id);
       controller.onSongChange(uri!, playerState());
     },
     "range",
