@@ -55,10 +55,12 @@ async function cosmosText(url: string): Promise<string> {
 }
 
 /**
- * Find a track's 30s preview mp3 url. Tries the client's already-loaded track
- * metadata first (no network — the reliable hop), then the public embed page
- * via CosmosAsync (which may be blocked on some clients). Add sources here if a
- * probe shows another hop works.
+ * Find a track's 30s preview mp3 url:
+ *  1. the client's already-loaded metadata (no network),
+ *  2. Spotify's internal metadata service — CosmosAsync CAN reach spclient
+ *     (external hosts like open.spotify.com return "Resolver not found"), and it
+ *     carries the preview file id,
+ *  3. the public embed page (usually blocked in-app; kept as a last resort).
  */
 async function getPreviewUrl(id: string): Promise<string | null> {
   const item = Spicetify.Player.data?.item as any;
@@ -67,6 +69,18 @@ async function getPreviewUrl(id: string): Promise<string | null> {
     for (const c of [item.previewUrl, item.preview_url, meta.preview_url, meta.audio_preview_url]) {
       if (typeof c === "string" && c.startsWith("http")) return c;
     }
+  }
+  try {
+    const gid = Spicetify.URI.idToHex(id);
+    const meta: any = await Spicetify.CosmosAsync.get(
+      `https://spclient.wg.spotify.com/metadata/4/track/${gid}?market=from_token`
+    );
+    const fileId = Array.isArray(meta?.preview) ? meta.preview[0]?.file_id : undefined;
+    if (typeof fileId === "string" && fileId) {
+      return `https://p.scdn.co/mp3-preview/${fileId}`;
+    }
+  } catch {
+    /* fall through */
   }
   try {
     const url = parsePreviewUrl(await cosmosText(`https://open.spotify.com/embed/track/${id}`));
