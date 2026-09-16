@@ -318,8 +318,8 @@ function resolveRemovalTarget(text: string): string | null {
   if (trailing && getOverride(overridesStore, trailing[1])) return trailing[1];
   const direct = parseTrackId(t);
   if (direct && getOverride(overridesStore, direct)) return direct;
-  const ids = matchByName(overridesStore, t);
-  return ids.length === 1 ? ids[0] : null;
+  const matches = searchWhitelist(t); // resolves once the search narrows to one entry
+  return matches.length === 1 ? matches[0].id : null;
 }
 
 /** Show an "are you sure" prompt, running onConfirm only if the user confirms. */
@@ -428,7 +428,13 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
     openDropdown();
     updateSelected();
   };
-  input.onfocus = () => openDropdown();
+  // Clear on focus so clicking back in starts a fresh search.
+  input.onfocus = () => {
+    input.value = "";
+    whitelistSearch = "";
+    openDropdown();
+    updateSelected();
+  };
   input.onblur = () => window.setTimeout(() => (dropdown.style.display = "none"), 150);
   updateSelected();
 
