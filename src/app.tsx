@@ -94,15 +94,17 @@ const VIDEO_ID = "catjam-webm";
 const BOTTOM_PLAYER_SELECTOR = ".main-nowPlayingBar-right";
 const LEFT_LIBRARY_SELECTOR = ".main-yourLibraryX-libraryItemContainer";
 const OBSERVER_TIMEOUT_MS = 30_000;
-const DELAY_FIELD = "catjam-delay";
+const SETTINGS_ID = "catjam-settings";
+const DELAY_FIELD = "catjam-delay"; // coarse slider
+const DELAY_TEXT_FIELD = "catjam-delay-ms"; // fine-tune number input
 
-const settings = new SettingsSection("Cat-Jam Settings", "catjam-settings");
+const settings = new SettingsSection("Cat-Jam Settings", SETTINGS_ID);
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 const VIDEO_SOURCES = {
-  DEFAULT: "Cat Jam (default)",
+  DEFAULT: "Cat Jam",
   BONGO: "Bongo Cat",
   CUSTOM: "Custom webM URL",
 } as const;
@@ -358,12 +360,27 @@ async function setupWhitelistPreview(): Promise<void> {
   }
 }
 
-/** Point the delay slider at the current song's stored value (0 if none). */
+/**
+ * Reflect a delay value in both delay controls (slider + number). Updates the
+ * stored field value and the live DOM value directly — no rerender, so a
+ * focused input keeps its cursor. `skipDomField` leaves the just-edited control
+ * alone so typing isn't disturbed.
+ */
+function writeDelayDisplays(ms: number, skipDomField?: string): void {
+  const value = String(ms);
+  for (const field of [DELAY_FIELD, DELAY_TEXT_FIELD]) {
+    settings.setFieldValue(field, value);
+    if (field !== skipDomField) {
+      const el = document.getElementById(`${SETTINGS_ID}.${field}`) as HTMLInputElement | null;
+      if (el) el.value = value;
+    }
+  }
+}
+
+/** Point both delay controls at the current song's stored value (0 if none). */
 function syncDelaySlider(): void {
   const id = spotifyIdFromUri(Spicetify.Player.data?.item?.uri);
-  const stored = id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0;
-  settings.setFieldValue(DELAY_FIELD, String(stored));
-  settings.rerender();
+  writeDelayDisplays(id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0);
 }
 
 /** Mounts the video into the first available container; null if UI changed shape. */
@@ -506,21 +523,34 @@ async function main() {
     "Size of webM video on the left library (Only works for left library, Default: 100)",
     ""
   );
+  // Manual sync delay: a coarse slider and a fine-tune number input, both
+  // writing the current song's delay and mirroring each other's value.
+  const applyDelay = (ms: number, sourceField: string): void => {
+    // spcr-settings persists the field value before onChange fires; we read it back.
+    const uri = Spicetify.Player.data?.item?.uri;
+    const id = spotifyIdFromUri(uri);
+    if (!id) return;
+    const clamped = clampDelay(ms);
+    setDelayMs(overridesStore, id, clamped);
+    recordName(uri, id);
+    writeDelayDisplays(clamped, sourceField); // update the peer control (not the one being edited)
+    controller.onSongChange(uri!, playerState());
+  };
   settings.addInput(
     DELAY_FIELD,
-    `Manual sync delay for the current song (ms, max ${MAX_DELAY_MS})`,
+    `Manual sync delay for the current song (ms slider, max ${MAX_DELAY_MS})`,
     "0",
-    () => {
-      // spcr-settings persists the field value before this fires; read it back.
-      const uri = Spicetify.Player.data?.item?.uri;
-      const id = spotifyIdFromUri(uri);
-      if (!id) return;
-      setDelayMs(overridesStore, id, clampDelay(Number(settings.getFieldValue(DELAY_FIELD)) || 0));
-      recordName(uri, id);
-      controller.onSongChange(uri!, playerState());
-    },
+    () => applyDelay(Number(settings.getFieldValue(DELAY_FIELD)) || 0, DELAY_FIELD),
     "range",
     { min: "0", max: String(MAX_DELAY_MS), step: "10" }
+  );
+  settings.addInput(
+    DELAY_TEXT_FIELD,
+    `Manual sync delay — fine tune (exact ms, 0-${MAX_DELAY_MS})`,
+    "0",
+    () => applyDelay(Number(settings.getFieldValue(DELAY_TEXT_FIELD)) || 0, DELAY_TEXT_FIELD),
+    "number",
+    { min: "0", max: String(MAX_DELAY_MS), step: "1" }
   );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();
