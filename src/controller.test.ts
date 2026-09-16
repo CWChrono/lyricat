@@ -202,6 +202,37 @@ describe("CatJamController", () => {
     expect(video.play).toHaveBeenCalled();
   });
 
+  it("feeds the pulse the felt tempo and danceability-scaled depth", async () => {
+    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), stop: vi.fn() };
+    const c = new CatJamController({
+      getConfig: () => CONFIG,
+      fetchAnalysis: () => Promise.resolve({ tempoBpm: 120, danceability: 0.9, energy: 0.7 }),
+      pulse,
+    });
+    c.setVideo(fakeVideo());
+
+    c.onSongChange("spotify:track:A", PLAYING);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // depthFromStats(0.9, 0.7) = 0.75*0.9 + 0.25*0.7 = 0.85; felt tempo = 120 (< 150).
+    const [bpm, depth] = pulse.setTrack.mock.lastCall!;
+    expect(bpm).toBeCloseTo(120);
+    expect(depth).toBeCloseTo(0.85);
+  });
+
+  it("rests the pulse (depth 0) for non-track uris", async () => {
+    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), stop: vi.fn() };
+    const c = new CatJamController({
+      getConfig: () => CONFIG,
+      fetchAnalysis: () => Promise.resolve({ tempoBpm: 120, danceability: 0.9 }),
+      pulse,
+    });
+    c.setVideo(fakeVideo());
+
+    c.onSongChange(undefined, PLAYING); // podcast / local file / nothing playing
+    expect(pulse.setTrack).toHaveBeenLastCalledWith(undefined, 0);
+  });
+
   it("no-ops safely without a mounted video", async () => {
     const c = makeController(() => Promise.resolve({ tempoBpm: 180 }));
     expect(() => {

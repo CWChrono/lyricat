@@ -1,9 +1,14 @@
-import { computePlaybackRate } from "./tempo";
+import { computePlaybackRate, effectiveTempo } from "./tempo";
 import { nextBeatDelaySeconds, Beat } from "./beats";
+import { VideoPulse, depthFromStats } from "./pulse";
 
 export interface AnalysisResult {
   tempoBpm?: number;
   beats?: Beat[];
+  /** Danceability [0,1] — scales how hard the cat pulses/bounces. */
+  danceability?: number;
+  /** Energy [0,1] — secondary pulse-intensity signal. */
+  energy?: number;
 }
 
 export interface CatJamConfig {
@@ -27,6 +32,8 @@ interface Deps {
   getDoubleTime?(uri: string): boolean | undefined;
   /** Manual sync delay (ms) for a track; the cat holds the first frame this long. */
   getDelayMs?(uri: string): number;
+  /** Optional beat-synced brightness/scale pulse driven off the felt tempo + danceability. */
+  pulse?: VideoPulse;
 }
 
 const SEEK_THRESHOLD_MS = 500;
@@ -62,6 +69,8 @@ export class CatJamController {
   private currentUri: string | undefined;
   private tempoBpm: number | undefined;
   private beats: Beat[] | undefined;
+  private danceability: number | undefined;
+  private energy: number | undefined;
   private beatTimer: ReturnType<typeof setTimeout> | null = null;
   private lastProgressMs = 0;
 
@@ -69,7 +78,9 @@ export class CatJamController {
 
   setVideo(video: HTMLVideoElement | null): void {
     this.video = video;
+    this.deps.pulse?.attach(video);
     this.applyRate();
+    this.updatePulseTrack();
   }
 
   onSongChange(uri: string | undefined, state: PlaybackState): void {
@@ -78,7 +89,10 @@ export class CatJamController {
     this.clearBeatTimer();
     this.tempoBpm = undefined;
     this.beats = undefined;
+    this.danceability = undefined;
+    this.energy = undefined;
     this.lastProgressMs = state.progressMs;
+    this.updatePulseTrack(); // reset the pulse (default tempo / off for non-tracks)
 
     if (!uri) return;
     if (this.video && state.isPlaying) safePlay(this.video);
@@ -88,7 +102,10 @@ export class CatJamController {
       if (gen !== this.generation || uri !== this.currentUri) return; // stale
       this.tempoBpm = result?.tempoBpm;
       this.beats = Array.isArray(result?.beats) ? result!.beats : undefined;
+      this.danceability = result?.danceability;
+      this.energy = result?.energy;
       this.applyRate();
+      this.updatePulseTrack();
       this.resync(state.progressMs, state.isPlaying);
     });
   }
@@ -125,6 +142,21 @@ export class CatJamController {
       cfg.minRate,
       cfg.maxRate
     );
+  }
+
+  /** The tempo the cat is felt to dance at (after the double-time fold), or undefined. */
+  private feltBpm(): number | undefined {
+    if (this.tempoBpm === undefined) return undefined;
+    const doubleTime = this.currentUri ? this.deps.getDoubleTime?.(this.currentUri) : undefined;
+    return effectiveTempo(this.tempoBpm, doubleTime);
+  }
+
+  /** Push the current track's felt tempo + pulse depth to the pulse animator. */
+  private updatePulseTrack(): void {
+    if (!this.deps.pulse) return;
+    // Non-track (podcast/local/none): depth 0 → the pulse rests at normal.
+    const depth = this.currentUri ? depthFromStats(this.danceability, this.energy) : 0;
+    this.deps.pulse.setTrack(this.feltBpm(), depth);
   }
 
   private resync(progressMs: number, isPlaying: boolean): void {

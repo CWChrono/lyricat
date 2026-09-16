@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   spotifyIdFromUri,
   parseTempo,
+  parseFeature,
   createAnalysisFetcher,
   parsePreviewUrl,
   parseAnalysisTempo,
@@ -19,6 +20,9 @@ function status(code: number): { ok: boolean; status: number; json(): Promise<un
   return { ok: false, status: code, json: () => Promise.resolve({}) };
 }
 const features = (tempo: number) => ({ content: [{ tempo }] });
+const featuresFull = (tempo: number, danceability: number, energy: number) => ({
+  content: [{ tempo, danceability, energy }],
+});
 
 describe("spotifyIdFromUri", () => {
   it("extracts the base-62 id from a track uri", () => {
@@ -48,6 +52,19 @@ describe("parseTempo", () => {
   });
 });
 
+describe("parseFeature", () => {
+  it("reads danceability/energy in [0,1]", () => {
+    expect(parseFeature(featuresFull(120, 0.82, 0.61), "danceability")).toBeCloseTo(0.82);
+    expect(parseFeature(featuresFull(120, 0.82, 0.61), "energy")).toBeCloseTo(0.61);
+  });
+  it("returns undefined for missing, out-of-range, or non-number values", () => {
+    expect(parseFeature({}, "danceability")).toBeUndefined();
+    expect(parseFeature(features(120), "danceability")).toBeUndefined();
+    expect(parseFeature({ content: [{ danceability: 1.5 }] }, "danceability")).toBeUndefined();
+    expect(parseFeature({ content: [{ danceability: "hi" }] }, "danceability")).toBeUndefined();
+  });
+});
+
 describe("createAnalysisFetcher", () => {
   it("returns the track tempo from ReccoBeats", async () => {
     const fetchFn = vi.fn<FetchLike>().mockResolvedValue(okJson(features(95.006)));
@@ -57,6 +74,17 @@ describe("createAnalysisFetcher", () => {
     expect(result).toEqual({ tempoBpm: 95.006 });
     expect(fetchFn).toHaveBeenCalledOnce();
     expect(fetchFn.mock.calls[0][0]).toContain("ids=venus");
+  });
+
+  it("attaches danceability and energy when present", async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(okJson(featuresFull(128, 0.9, 0.7)));
+    const fetchAnalysis = createAnalysisFetcher(fetchFn, noSleep);
+
+    expect(await fetchAnalysis("spotify:track:dance")).toEqual({
+      tempoBpm: 128,
+      danceability: 0.9,
+      energy: 0.7,
+    });
   });
 
   it("caches a hit so replays and seeks do not refetch", async () => {

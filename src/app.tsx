@@ -36,6 +36,7 @@ import {
   MAX_DELAY_MS,
 } from "./overrides";
 import { BONGOCAT_VIDEO_URL } from "./resources/bongocat";
+import { createVideoPulse, PulseConfig } from "./pulse";
 
 // Per-track overrides (bpm / double-time / delay) live in Spicetify LocalStorage.
 const overridesStore: KeyValueStore = {
@@ -94,6 +95,22 @@ const VIDEO_SOURCES = {
   CUSTOM: "Custom webM URL",
 } as const;
 const VIDEO_SOURCE_FIELD = "catjam-video-source";
+
+// Beat-synced pulse: brighten and/or bounce the cat on the beat, scaled by how
+// danceable the track is. The two effects toggle independently.
+const PULSE_BRIGHTNESS_FIELD = "catjam-pulse-brightness";
+const PULSE_SCALE_FIELD = "catjam-pulse-scale";
+const PULSE_INTENSITY_FIELD = "catjam-pulse-intensity";
+
+function getPulseConfig(): PulseConfig {
+  const intensity = Number(settings.getFieldValue(PULSE_INTENSITY_FIELD));
+  return {
+    // Default ON: only an explicit false disables (guards the pre-load default).
+    brightness: settings.getFieldValue(PULSE_BRIGHTNESS_FIELD) !== false,
+    scale: settings.getFieldValue(PULSE_SCALE_FIELD) !== false,
+    intensity: Math.min(1, Math.max(0, (Number.isFinite(intensity) ? intensity : 70) / 100)),
+  };
+}
 
 // Bongo Cat is a 2-frame loop of 200 ms (10 fps), so at rate 1 the paws flap
 // 600×/min. A video BPM of 600 makes each frame land on a beat, and its rates
@@ -778,6 +795,14 @@ async function main() {
   };
   analyze = fetchAnalysis;
 
+  // Beat-synced brightness/scale pulse. Self-clocked off Spicetify.Player, so it
+  // stays smooth between the coarse progress events; the controller feeds it the
+  // felt tempo + danceability per track.
+  const pulse = createVideoPulse(getPulseConfig, {
+    getProgress: () => Spicetify.Player.getProgress(),
+    isPlaying: () => Spicetify.Player.isPlaying(),
+  });
+
   const controller = new CatJamController({
     getConfig,
     fetchAnalysis,
@@ -789,6 +814,7 @@ async function main() {
       const id = spotifyIdFromUri(uri);
       return id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0;
     },
+    pulse,
   });
   catController = controller; // used by the injected panel's per-song controls
 
@@ -828,6 +854,25 @@ async function main() {
     "Size of webM video on the left library (Only works for left library, Default: 100)",
     ""
   );
+  // Beat-synced pulse (independently toggleable). Dancier songs pulse harder.
+  settings.addToggle(
+    PULSE_BRIGHTNESS_FIELD,
+    "Pulse: brighten on the beat (dancier songs pulse harder)",
+    true
+  );
+  settings.addToggle(
+    PULSE_SCALE_FIELD,
+    "Pulse: bounce — grow very slightly on the beat",
+    true
+  );
+  settings.addInput(
+    PULSE_INTENSITY_FIELD,
+    "Pulse intensity (0-100, scales brightness + bounce)",
+    "70",
+    undefined,
+    "number",
+    { min: "0", max: "100", step: "5" }
+  );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();
   });
@@ -837,6 +882,10 @@ async function main() {
   void setupWhitelistPreview();
 
   await ensureMounted();
+  // Initialise rate + pulse for the track already playing (the songchange event
+  // only fires on the next track otherwise).
+  const startUri = Spicetify.Player.data?.item?.uri;
+  if (startUri) controller.onSongChange(startUri, playerState());
   void refreshNowPlaying(); // populate detected bpm for the track already playing
 
   Spicetify.Player.addEventListener("songchange", () => {

@@ -26,6 +26,22 @@ export function parseTempo(body: unknown): number | null {
   return typeof tempo === "number" && Number.isFinite(tempo) && tempo > 0 ? tempo : null;
 }
 
+/** Read a normalized [0,1] feature (danceability/energy) from a features response. */
+export function parseFeature(body: unknown, key: "danceability" | "energy"): number | undefined {
+  const v = (body as { content?: Array<Record<string, unknown>> })?.content?.[0]?.[key];
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : undefined;
+}
+
+/** Assemble an AnalysisResult from a features response, attaching stats when present. */
+function toAnalysis(body: unknown, tempoBpm: number): AnalysisResult {
+  const result: AnalysisResult = { tempoBpm };
+  const danceability = parseFeature(body, "danceability");
+  const energy = parseFeature(body, "energy");
+  if (danceability !== undefined) result.danceability = danceability;
+  if (energy !== undefined) result.energy = energy;
+  return result;
+}
+
 /**
  * Builds the `fetchAnalysis(uri)` the controller depends on, backed by
  * ReccoBeats. Definitive answers — a tempo, or a "server answered but the track
@@ -50,8 +66,9 @@ export function createAnalysisFetcher(
       try {
         const res = await fetchFn(url);
         if (res.ok) {
-          const tempo = parseTempo(await res.json());
-          const result = tempo !== null ? { tempoBpm: tempo } : null;
+          const body = await res.json();
+          const tempo = parseTempo(body);
+          const result = tempo !== null ? toAnalysis(body, tempo) : null;
           cache.set(uri, result); // definitive
           return result;
         }
