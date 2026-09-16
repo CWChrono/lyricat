@@ -21,6 +21,7 @@ import {
 } from "./reccobeats";
 import {
   KeyValueStore,
+  readOverrides,
   getOverride,
   setStoredBpm,
   setDelayMs,
@@ -78,7 +79,7 @@ const VIDEO_SOURCE_FIELD = "catjam-video-source";
 const BONGO_DEFAULT_BPM = 600;
 const BONGO_MIN_RATE = 0.1;
 const BONGO_MAX_RATE = 0.35;
-const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(30px);";
+const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(20px);";
 
 function currentSource(): string {
   return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
@@ -185,6 +186,24 @@ async function toggleDoubleTime(
     `Cat-Jam: ${item?.name ?? "Track"} — double-time ${next ? "ON" : "OFF"} ` +
       `(cat ${rate.toFixed(2)}×)`
   );
+}
+
+/**
+ * Export the per-song whitelist so it can be opened in a text editor. A
+ * Spicetify extension runs in Spotify's sandboxed renderer and can't launch
+ * the OS editor directly, so this downloads a pretty-printed JSON file.
+ */
+function openWhitelist(): void {
+  const json = JSON.stringify(readOverrides(overridesStore), null, 2);
+  const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "catjam-whitelist.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  Spicetify.showNotification("Cat-Jam: whitelist saved as catjam-whitelist.json — open it in your editor");
 }
 
 /** Point the delay slider at the current song's stored value (0 if none). */
@@ -356,6 +375,14 @@ async function main() {
     "Toggle double-time",
     () => {
       void toggleDoubleTime(fetchAnalysis, controller);
+    }
+  );
+  settings.addButton(
+    "catjam-open-whitelist",
+    "Open the per-song whitelist (downloads a JSON file to view/edit)",
+    "Open whitelist",
+    () => {
+      openWhitelist();
     }
   );
   void settings.pushSettings();
