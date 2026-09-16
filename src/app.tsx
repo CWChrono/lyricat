@@ -43,7 +43,16 @@ const overridesStore: KeyValueStore = {
 // is streamed straight into the upload and never stored.
 const previewDeps: PreviewDeps = {
   fetchText: async (url) => {
-    const body = await Spicetify.CosmosAsync.get(url);
+    // CosmosAsync.get may try to JSON-parse the HTML; fall back to the raw
+    // request body if it throws or hands back a non-string.
+    try {
+      const body = await Spicetify.CosmosAsync.get(url);
+      if (typeof body === "string" && body) return body;
+    } catch {
+      /* fall through to request */
+    }
+    const res = await Spicetify.CosmosAsync.request("GET", url);
+    const body = (res as { body?: unknown })?.body;
     return typeof body === "string" ? body : JSON.stringify(body ?? "");
   },
   fetchBlob: (url) => fetch(url).then((r) => r.blob()),
@@ -79,7 +88,7 @@ const VIDEO_SOURCE_FIELD = "catjam-video-source";
 const BONGO_DEFAULT_BPM = 600;
 const BONGO_MIN_RATE = 0.1;
 const BONGO_MAX_RATE = 0.35;
-const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(20px);";
+const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(17px);";
 
 function currentSource(): string {
   return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
@@ -111,24 +120,6 @@ function playerState(): PlaybackState {
   };
 }
 
-/**
- * Resolve a track's tempo: live ReccoBeats id lookup (or a previously stored
- * value) first, then — only if that is empty — the preview analysis, whose
- * result is persisted so it is never re-fetched. Returns undefined if unknown.
- */
-async function resolveTempo(
-  uri: string,
-  fetchAnalysis: (uri: string) => Promise<AnalysisResult | null>
-): Promise<number | undefined> {
-  const known = await fetchAnalysis(uri);
-  if (known?.tempoBpm) return known.tempoBpm;
-  const id = spotifyIdFromUri(uri);
-  if (!id) return undefined;
-  const bpm = await fetchTempoViaPreview(id, previewDeps);
-  if (bpm) setStoredBpm(overridesStore, id, bpm);
-  return bpm ?? undefined;
-}
-
 /** Check BPM button: resolve the tempo, apply it, and toast the result. */
 async function reportCurrentBpm(
   fetchAnalysis: (uri: string) => Promise<AnalysisResult | null>,
@@ -142,7 +133,7 @@ async function reportCurrentBpm(
     return;
   }
   Spicetify.showNotification("Cat-Jam: checking BPM…");
-  const bpm = await resolveTempo(uri!, fetchAnalysis);
+  const bpm = (await fetchAnalysis(uri!))?.tempoBpm;
   if (!bpm) {
     Spicetify.showNotification("Cat-Jam: BPM unavailable for this track", true);
     return;
@@ -173,7 +164,7 @@ async function toggleDoubleTime(
     Spicetify.showNotification("Cat-Jam: no Spotify track is playing", true);
     return;
   }
-  const bpm = await resolveTempo(uri!, fetchAnalysis);
+  const bpm = (await fetchAnalysis(uri!))?.tempoBpm;
   if (!bpm) {
     Spicetify.showNotification("Cat-Jam: BPM unavailable — can't set double-time", true);
     return;
@@ -188,22 +179,21 @@ async function toggleDoubleTime(
   );
 }
 
-/**
- * Export the per-song whitelist so it can be opened in a text editor. A
- * Spicetify extension runs in Spotify's sandboxed renderer and can't launch
- * the OS editor directly, so this downloads a pretty-printed JSON file.
- */
+/** Show the per-song whitelist as a scrollable, selectable JSON preview. */
 function openWhitelist(): void {
-  const json = JSON.stringify(readOverrides(overridesStore), null, 2);
-  const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "catjam-whitelist.json";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  Spicetify.showNotification("Cat-Jam: whitelist saved as catjam-whitelist.json — open it in your editor");
+  const map = readOverrides(overridesStore);
+  const json = JSON.stringify(map, null, 2);
+  const box = document.createElement("pre");
+  box.textContent =
+    Object.keys(map).length === 0
+      ? "{}\n\n(empty — play some songs, or use Check BPM / Toggle double-time)"
+      : json;
+  box.style.cssText =
+    "max-height: 55vh; overflow: auto; white-space: pre-wrap; word-break: break-all; " +
+    "margin: 0; padding: 12px; font-family: var(--font-mono, monospace); font-size: 12px; " +
+    "line-height: 1.5; background: var(--spice-main, rgba(0,0,0,.25)); border-radius: 8px; " +
+    "user-select: text;";
+  Spicetify.PopupModal.display({ title: "Cat-Jam whitelist", content: box, isLarge: true });
 }
 
 /** Point the delay slider at the current song's stored value (0 if none). */
@@ -293,8 +283,17 @@ async function main() {
     const live = await liveFetch(uri);
     if (live?.tempoBpm) return live;
     const id = spotifyIdFromUri(uri);
-    const stored = id ? getOverride(overridesStore, id)?.bpm : undefined;
-    return stored ? { tempoBpm: stored } : live;
+    if (!id) return live;
+    const stored = getOverride(overridesStore, id)?.bpm;
+    if (stored) return { tempoBpm: stored };
+    // Missing from ReccoBeats' id DB: analyse the 30s preview once, persist it,
+    // so subsequent plays use the stored value instead of re-analysing.
+    const bpm = await fetchTempoViaPreview(id, previewDeps);
+    if (bpm) {
+      setStoredBpm(overridesStore, id, bpm);
+      return { tempoBpm: bpm };
+    }
+    return live; // null — no preview available / analysis failed
   };
 
   const controller = new CatJamController({
@@ -379,8 +378,8 @@ async function main() {
   );
   settings.addButton(
     "catjam-open-whitelist",
-    "Open the per-song whitelist (downloads a JSON file to view/edit)",
-    "Open whitelist",
+    "View the per-song whitelist (scrollable preview of bpm / double-time / delay)",
+    "View whitelist",
     () => {
       openWhitelist();
     }
