@@ -20,6 +20,10 @@ export interface PlaybackState {
 interface Deps {
   getConfig(): CatJamConfig;
   fetchAnalysis(uri: string): Promise<AnalysisResult | null>;
+  /** Manual double-time override for a track, or undefined to use auto detection. */
+  getDoubleTime?(uri: string): boolean | undefined;
+  /** Manual sync delay (ms) for a track; the cat holds the first frame this long. */
+  getDelayMs?(uri: string): number;
 }
 
 const SEEK_THRESHOLD_MS = 500;
@@ -107,9 +111,13 @@ export class CatJamController {
 
   private applyRate(): void {
     if (!this.video) return;
+    const doubleTime = this.currentUri
+      ? this.deps.getDoubleTime?.(this.currentUri)
+      : undefined;
     this.video.playbackRate = computePlaybackRate(
       this.tempoBpm,
-      this.deps.getConfig().defaultBpm
+      this.deps.getConfig().defaultBpm,
+      doubleTime
     );
   }
 
@@ -120,15 +128,29 @@ export class CatJamController {
     this.clearBeatTimer();
     // Re-align the loop with the track position regardless of beats.
     video.currentTime = 0;
-    if (delaySeconds === null) {
+
+    if (delaySeconds !== null) {
+      // Beat-phase alignment: restart on the next beat (used when beats exist).
+      this.beatTimer = setTimeout(() => {
+        this.beatTimer = null;
+        video.currentTime = 0;
+        safePlay(video);
+      }, Math.max(0, delaySeconds * 1000));
+      return;
+    }
+
+    const manualDelayMs = this.currentUri ? this.deps.getDelayMs?.(this.currentUri) ?? 0 : 0;
+    if (manualDelayMs <= 0) {
       safePlay(video);
       return;
     }
+    // Manual sync offset: hold the first frame, then start after the delay.
+    video.pause();
     this.beatTimer = setTimeout(() => {
       this.beatTimer = null;
       video.currentTime = 0;
       safePlay(video);
-    }, Math.max(0, delaySeconds * 1000));
+    }, manualDelayMs);
   }
 
   private clearBeatTimer(): void {

@@ -36,7 +36,7 @@ describe("CatJamController", () => {
   it("stale analysis result cannot overwrite a newer track", async () => {
     const pendingA = deferred<AnalysisResult | null>();
     const c = makeController((uri) =>
-      uri === "spotify:track:A" ? pendingA.promise : Promise.resolve({ tempoBpm: 270.96 })
+      uri === "spotify:track:A" ? pendingA.promise : Promise.resolve({ tempoBpm: 67.74 })
     );
     const video = fakeVideo();
     c.setVideo(video);
@@ -47,11 +47,51 @@ describe("CatJamController", () => {
 
     c.onSongChange("spotify:track:B", PLAYING);
     await vi.advanceTimersByTimeAsync(0);
-    expect(video.playbackRate).toBeCloseTo(2); // 270.96 / 135.48
+    expect(video.playbackRate).toBeCloseTo(0.5); // 67.74 / 135.48
 
-    pendingA.resolve({ tempoBpm: 60 }); // late result for the OLD track
+    pendingA.resolve({ tempoBpm: 200 }); // late result for the OLD track
     await vi.advanceTimersByTimeAsync(0);
-    expect(video.playbackRate).toBeCloseTo(2); // unchanged by stale A
+    expect(video.playbackRate).toBeCloseTo(0.5); // unchanged by stale A
+  });
+
+  it("applies a manual double-time override on reload", async () => {
+    let override: boolean | undefined = undefined;
+    const c = new CatJamController({
+      getConfig: () => CONFIG,
+      fetchAnalysis: () => Promise.resolve({ tempoBpm: 140 }),
+      getDoubleTime: () => override,
+    });
+    const video = fakeVideo();
+    c.setVideo(video);
+
+    c.onSongChange("spotify:track:A", PLAYING);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(video.playbackRate).toBeCloseTo(140 / 135.48); // 140 < 150, auto keeps it
+
+    override = true; // user marks it double-time
+    c.onSongChange("spotify:track:A", PLAYING); // reload picks up the override
+    await vi.advanceTimersByTimeAsync(0);
+    expect(video.playbackRate).toBeCloseTo(70 / 135.48); // halved
+  });
+
+  it("holds the first frame for the manual sync delay, then plays", async () => {
+    const c = new CatJamController({
+      getConfig: () => CONFIG,
+      fetchAnalysis: () => Promise.resolve({ tempoBpm: 120 }), // no beats
+      getDelayMs: () => 200,
+    });
+    const video = fakeVideo();
+    c.setVideo(video);
+
+    c.onSongChange("spotify:track:A", PLAYING);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(video.pause).toHaveBeenCalled(); // held at frame 0
+    const playsBefore = video.play.mock.calls.length;
+
+    video.currentTime = 7;
+    vi.advanceTimersByTime(200);
+    expect(video.currentTime).toBe(0); // restarted after the delay
+    expect(video.play.mock.calls.length).toBe(playsBefore + 1);
   });
 
   it("song change cancels pending beat timers of the previous track", async () => {

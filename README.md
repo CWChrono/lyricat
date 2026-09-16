@@ -12,6 +12,16 @@ Maintained fork of [BlafKing/spicetify-cat-jam-synced](https://github.com/BlafKi
 
 # Changelog 📋
 
+<h3>v1.4.0</h3>
+
+- Tempo now comes from [ReccoBeats](https://reccobeats.com) instead of `getAudioData` — Spotify removed its `audio-analysis` / `audio-features` endpoints in Nov 2024, which broke BPM sync entirely. ReccoBeats is keyed by Spotify track id, needs no API key, and requires no downgrade.
+- Slow songs that beat detectors report at double-time (e.g. an 85 BPM track detected as 170) are folded back to the felt tempo, so the cat no longer jams twice as fast on them.
+- Added a **Check BPM** button that reports the current song's detected tempo and the cat's resulting playback rate.
+- Added a per-song **double-time** toggle to manually override the automatic detection; the choice is remembered per track.
+- For tracks ReccoBeats doesn't have, BPM is recovered by analysing the 30s preview clip (uploaded to ReccoBeats' analysis endpoint, never stored) and cached per track.
+- Added a per-song **manual sync delay** slider (0–500 ms) to nudge the cat into alignment; remembered per track.
+- Added a **Bongo Cat** video option alongside the default cat and custom webM URL, selectable from a new source dropdown.
+
 <h3>v1.3.0</h3>
 
 - Rewritten synchronization core: a single controller owns track identity, audio analysis, beat timers and the video element.

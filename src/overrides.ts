@@ -1,0 +1,106 @@
+// Persisted per-track data keyed by Spotify track id. Holds a manually resolved
+// `bpm` (used when ReccoBeats' id lookup has no tempo) and/or a `doubleTime`
+// flag that overrides the automatic octave-fold detection.
+const STORAGE_KEY = "catjam-doubletime-overrides";
+
+/** Minimal key/value store — Spicetify.LocalStorage satisfies this shape. */
+export interface KeyValueStore {
+  get(key: string): string | null;
+  set(key: string, value: string): void;
+}
+
+export const MAX_DELAY_MS = 500;
+
+export interface TrackOverride {
+  /** Tempo resolved out-of-band (e.g. from the preview analysis) in BPM. */
+  bpm?: number;
+  /** true = treat as double-time (halve), false = trust the raw tempo. */
+  doubleTime?: boolean;
+  /** Manual sync offset in ms [0, MAX_DELAY_MS] applied before the cat restarts. */
+  delayMs?: number;
+}
+
+function isBpm(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+function isDelay(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
+/** Clamp an arbitrary number to a whole millisecond delay in range. */
+export function clampDelay(ms: number): number {
+  if (!Number.isFinite(ms)) return 0;
+  return Math.min(MAX_DELAY_MS, Math.max(0, Math.round(ms)));
+}
+
+/**
+ * Read the whole map, tolerating missing/corrupt storage and migrating the
+ * legacy `{ id: boolean }` shape (double-time only) to `{ id: { doubleTime } }`.
+ */
+export function readOverrides(store: KeyValueStore): Record<string, TrackOverride> {
+  try {
+    const parsed = JSON.parse(store.get(STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, TrackOverride> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof value === "boolean") {
+        out[id] = { doubleTime: value }; // legacy format
+      } else if (value && typeof value === "object") {
+        const entry: TrackOverride = {};
+        const { bpm, doubleTime, delayMs } = value as TrackOverride;
+        if (isBpm(bpm)) entry.bpm = bpm;
+        if (typeof doubleTime === "boolean") entry.doubleTime = doubleTime;
+        if (isDelay(delayMs)) entry.delayMs = clampDelay(delayMs);
+        out[id] = entry;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Stored data for a track, or undefined when nothing is recorded. */
+export function getOverride(store: KeyValueStore, id: string): TrackOverride | undefined {
+  return readOverrides(store)[id];
+}
+
+function writeOverride(
+  store: KeyValueStore,
+  id: string,
+  patch: TrackOverride
+): TrackOverride {
+  const all = readOverrides(store);
+  const merged = { ...(all[id] ?? {}), ...patch };
+  all[id] = merged;
+  store.set(STORAGE_KEY, JSON.stringify(all));
+  return merged;
+}
+
+/** Persist a resolved tempo for a track (e.g. from the preview analysis). */
+export function setStoredBpm(store: KeyValueStore, id: string, bpm: number): void {
+  if (isBpm(bpm)) writeOverride(store, id, { bpm });
+}
+
+/** Persist a manual sync delay (ms) for a track, clamped to [0, MAX_DELAY_MS]. */
+export function setDelayMs(store: KeyValueStore, id: string, ms: number): void {
+  writeOverride(store, id, { delayMs: clampDelay(ms) });
+}
+
+/**
+ * Flip the effective double-time state and persist it. With no explicit flag
+ * yet, `autoDoubleTime` (what the heuristic currently does) is the starting
+ * point, so one press always inverts the behaviour the user is seeing.
+ * Returns the newly stored value.
+ */
+export function flipDoubleTime(
+  store: KeyValueStore,
+  id: string,
+  autoDoubleTime: boolean
+): boolean {
+  const current = readOverrides(store)[id]?.doubleTime;
+  const next = !(typeof current === "boolean" ? current : autoDoubleTime);
+  writeOverride(store, id, { doubleTime: next });
+  return next;
+}
