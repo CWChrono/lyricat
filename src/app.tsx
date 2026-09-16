@@ -269,14 +269,25 @@ function whitelistPreviewText(): string {
   if (!id) return "No Spotify track playing.";
   const head = `${item?.name ?? "Current track"} — ${id}\n\n`;
 
-  const entry = getOverride(overridesStore, id);
-  if (entry) return head + JSON.stringify(entry, null, 2);
+  // Always show the effective bpm + double-time for the current song, whether or
+  // not it's saved: manual override wins, else the detected value; double-time is
+  // the manual flag, else the automatic octave fold.
+  const o = getOverride(overridesStore, id);
+  const effBpm = o?.bpm ?? o?.detectedBpm ?? (nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined);
+  if (effBpm == null) return head + "(detecting BPM…)";
 
-  // Not saved: show what the extension detected (bpm + the auto double-time fold).
-  const detected = nowPlayingBpm.id === id ? nowPlayingBpm.bpm : undefined;
-  if (detected == null) return head + "(not in whitelist yet — detecting BPM…)";
-  const detectedInfo = { bpm: Math.round(detected), doubleTime: normalizeTempo(detected) < detected };
-  return head + "(not in whitelist yet — detected)\n" + JSON.stringify(detectedInfo, null, 2);
+  const display: Record<string, number | boolean> = {
+    bpm: Math.round(effBpm),
+    doubleTime: o?.doubleTime ?? normalizeTempo(effBpm) < effBpm,
+  };
+  if (o?.detectedBpm != null && Math.round(o.detectedBpm) !== Math.round(effBpm)) {
+    display.detectedBpm = Math.round(o.detectedBpm);
+  }
+  if (o?.delayMs) display.delayMs = o.delayMs;
+
+  const status =
+    o?.bpm != null ? "manual BPM override" : o ? "detected (in whitelist)" : "detected (not saved)";
+  return head + JSON.stringify(display, null, 2) + `\n\n${status}`;
 }
 
 function whitelistButton(label: string, onClick: () => void): HTMLButtonElement {
@@ -331,32 +342,35 @@ function confirmRemove(label: string, onConfirm: () => void): void {
 }
 
 /**
- * Type-to-search removal: a combobox (datalist) filters the whitelist as you
- * type; "Remove selected" confirms, then deletes the chosen entry. `host` is
- * re-rendered afterwards to refresh the list + preview.
+ * Type-to-search removal: a styled custom combobox filters the whitelist as you
+ * type, the picked entry's data shows underneath, and "Remove selected" confirms
+ * then deletes it. `host` is re-rendered afterwards to refresh the list + preview.
  */
 function buildRemovalWidget(host: HTMLElement): HTMLElement {
   const container = document.createElement("div");
 
   const row = document.createElement("div");
-  row.setAttribute("style", "display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px;");
+  row.setAttribute("style", "display: flex; gap: 8px; align-items: flex-start; margin: 6px 0 8px;");
+
+  // The input + dropdown live in a positioned wrapper so the list floats below.
+  const combo = document.createElement("div");
+  combo.setAttribute("style", "position: relative; flex: 1 1 260px;");
 
   const input = document.createElement("input");
   input.type = "text";
   input.placeholder = "Type a song name or id to remove…";
   input.value = whitelistSearch;
-  input.setAttribute("list", "catjam-wl-options");
-  input.setAttribute("style", `flex: 1 1 260px; ${FIELD_STYLE}`);
+  input.setAttribute("style", `width: 100%; box-sizing: border-box; ${FIELD_STYLE}`);
 
-  const options = document.createElement("datalist");
-  options.id = "catjam-wl-options";
-  for (const m of searchWhitelist("")) {
-    const opt = document.createElement("option");
-    opt.value = m.label; // "Name · id" — the browser filters these as you type
-    options.appendChild(opt);
-  }
+  const dropdown = document.createElement("div");
+  dropdown.setAttribute(
+    "style",
+    "position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1000; max-height: 240px; " +
+      "overflow-y: auto; background: var(--spice-card, #282828); border: 1px solid var(--spice-button-disabled, #555); " +
+      "border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: none;"
+  );
 
-  // The selected entry's stored data, shown under the search once resolved.
+  // The picked entry's stored data, shown under the search once resolved.
   const selectedInfo = document.createElement("pre");
   selectedInfo.setAttribute(
     "style",
@@ -374,10 +388,48 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
       selectedInfo.style.display = "none";
     }
   };
+
+  const renderOptions = (): void => {
+    dropdown.textContent = "";
+    const matches = searchWhitelist(input.value);
+    if (matches.length === 0) {
+      const empty = document.createElement("div");
+      empty.textContent = "(no matches)";
+      empty.setAttribute("style", "padding: 8px 12px; color: var(--spice-subtext, #a7a7a7);");
+      dropdown.appendChild(empty);
+      return;
+    }
+    for (const m of matches) {
+      const opt = document.createElement("div");
+      opt.textContent = m.label;
+      opt.setAttribute(
+        "style",
+        "padding: 8px 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+      );
+      opt.onmouseenter = () => (opt.style.background = "var(--spice-highlight, rgba(255,255,255,.1))");
+      opt.onmouseleave = () => (opt.style.background = "transparent");
+      opt.onmousedown = (e) => {
+        e.preventDefault(); // keep input focus; fires before blur
+        input.value = m.label;
+        whitelistSearch = m.label;
+        dropdown.style.display = "none";
+        updateSelected();
+      };
+      dropdown.appendChild(opt);
+    }
+  };
+  const openDropdown = (): void => {
+    renderOptions();
+    dropdown.style.display = "block";
+  };
+
   input.oninput = () => {
     whitelistSearch = input.value;
+    openDropdown();
     updateSelected();
   };
+  input.onfocus = () => openDropdown();
+  input.onblur = () => window.setTimeout(() => (dropdown.style.display = "none"), 150);
   updateSelected();
 
   const remove = whitelistButton("Remove selected", () => {
@@ -395,7 +447,8 @@ function buildRemovalWidget(host: HTMLElement): HTMLElement {
     });
   });
 
-  row.append(input, options, remove);
+  combo.append(input, dropdown);
+  row.append(combo, remove);
   container.append(row, selectedInfo);
   return container;
 }
