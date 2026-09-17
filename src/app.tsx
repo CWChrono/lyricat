@@ -37,6 +37,7 @@ import {
 } from "./overrides";
 import { BONGOCAT_VIDEO_URL } from "./resources/bongocat";
 import { createVideoPulse, PulseConfig } from "./pulse";
+import { createSpicyOnsetReader } from "./spicylyrics";
 
 // Per-track overrides (bpm / double-time / delay) live in Spicetify LocalStorage.
 const overridesStore: KeyValueStore = {
@@ -101,6 +102,11 @@ const VIDEO_SOURCE_FIELD = "catjam-video-source";
 const PULSE_BRIGHTNESS_FIELD = "catjam-pulse-brightness";
 const PULSE_SCALE_FIELD = "catjam-pulse-scale";
 const PULSE_INTENSITY_FIELD = "catjam-pulse-intensity";
+const PULSE_LYRIC_FIELD = "catjam-pulse-lyricsync";
+
+function lyricSyncEnabled(): boolean {
+  return settings.getFieldValue(PULSE_LYRIC_FIELD) === true;
+}
 
 function getPulseConfig(): PulseConfig {
   const intensity = Number(settings.getFieldValue(PULSE_INTENSITY_FIELD));
@@ -803,6 +809,14 @@ async function main() {
     isPlaying: () => Spicetify.Player.isPlaying(),
   });
 
+  // Best-effort lyric-synced onsets, read from the Spicy Lyrics extension's
+  // exposed cache when the user opts in. Returns null (→ beat fallback) whenever
+  // it's off, Spicy Lyrics is absent, or the track has no cached synced lyrics.
+  const readSpicyOnsets = createSpicyOnsetReader(
+    lyricSyncEnabled,
+    () => (window as any).SpicyLyrics
+  );
+
   const controller = new CatJamController({
     getConfig,
     fetchAnalysis,
@@ -815,6 +829,7 @@ async function main() {
       return id ? getOverride(overridesStore, id)?.delayMs ?? 0 : 0;
     },
     pulse,
+    fetchOnsets: readSpicyOnsets,
   });
   catController = controller; // used by the injected panel's per-song controls
 
@@ -872,6 +887,21 @@ async function main() {
     undefined,
     "number",
     { min: "0", max: "100", step: "5" }
+  );
+  // Manual, off by default. Requires the third-party Spicy Lyrics extension —
+  // without it (or without cached synced lyrics for a track) the pulse just
+  // stays on the beat.
+  settings.addToggle(
+    PULSE_LYRIC_FIELD,
+    "Pulse on lyrics instead of the beat — ⚠ needs the Spicy Lyrics extension installed; " +
+      "falls back to the beat when it's missing or a track has no synced lyrics",
+    false,
+    () => {
+      // Apply immediately for the current track (spcr-settings persists the new
+      // value before this fires): re-read onsets, or clear them when toggled off.
+      const uri = Spicetify.Player.data?.item?.uri;
+      if (uri) void readSpicyOnsets(uri).then((onsets) => pulse.setOnsets(onsets));
+    }
   );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();

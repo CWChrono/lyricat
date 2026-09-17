@@ -34,6 +34,8 @@ interface Deps {
   getDelayMs?(uri: string): number;
   /** Optional beat-synced brightness/scale pulse driven off the felt tempo + danceability. */
   pulse?: VideoPulse;
+  /** Optional onset source (e.g. lyric syllables) that drives the pulse instead of the beat. */
+  fetchOnsets?(uri: string): Promise<number[] | null>;
 }
 
 const SEEK_THRESHOLD_MS = 500;
@@ -93,6 +95,7 @@ export class CatJamController {
     this.energy = undefined;
     this.lastProgressMs = state.progressMs;
     this.updatePulseTrack(); // reset the pulse (default tempo / off for non-tracks)
+    this.deps.pulse?.setOnsets(null); // drop stale onsets; a driver may supply fresh ones
 
     if (!uri) return;
     if (this.video && state.isPlaying) safePlay(this.video);
@@ -108,6 +111,15 @@ export class CatJamController {
       this.updatePulseTrack();
       this.resync(state.progressMs, state.isPlaying);
     });
+
+    // Best-effort onset driver (e.g. lyric syllables). Guarded like analysis so a
+    // late result can't apply to a newer track; null leaves the beat clock in charge.
+    if (this.deps.fetchOnsets && this.deps.pulse) {
+      void this.deps.fetchOnsets(uri).then((onsets) => {
+        if (gen !== this.generation || uri !== this.currentUri) return; // stale
+        this.deps.pulse!.setOnsets(onsets);
+      });
+    }
   }
 
   onPlayPause(state: PlaybackState): void {

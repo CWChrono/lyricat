@@ -36,7 +36,7 @@ export interface PlayerClock {
 export interface VideoPulse {
   /** Point the pulse at a (freshly mounted) video, or null to detach. */
   attach(video: HTMLVideoElement | null): void;
-  /** New track: its felt bpm (undefined = unknown) and pulse depth [0,1]. Clears onsets. */
+  /** New track: its felt bpm (undefined = unknown) and pulse depth [0,1]. */
   setTrack(feltBpm: number | undefined, depth: number): void;
   /** Explicit pulse onset times (ms) for the current track, or null for beat-driven. */
   setOnsets(onsetsMs: number[] | null): void;
@@ -263,7 +263,8 @@ export function createVideoPulse(
     setTrack(bpm: number | undefined, d: number): void {
       feltBpm = typeof bpm === "number" && bpm > 0 ? bpm : undefined;
       depth = clamp01(d);
-      onsets = null; // new track: drop stale onsets until a driver supplies fresh ones
+      // Onsets are managed separately (setOnsets) so a post-analysis tempo update
+      // doesn't wipe a driver's freshly-fetched onsets.
     },
     setOnsets(o: number[] | null): void {
       onsets = o && o.length ? [...o].sort((a, b) => a - b) : null;
