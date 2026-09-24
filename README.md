@@ -1,16 +1,55 @@
-# Cat Jam Synced
+# 🐱 Spicetify Bongo Cat Jam
 
 ![preview](marketplace/preview.gif)
 
-Make a cat appear next to your progress bar, jamming along with your music synchronized to the beat!
+A Bongo Cat that jams next to your player **in sync with your music's BPM** — brightening and bouncing to the beat (or the lyrics). A Spicetify extension.
 
-> ⚙ are located at the bottom of the regular Spotify settings.
+> ⚙ Settings live at the bottom of the regular Spotify settings, with a **Cat-Jam Library** panel below them for per-song BPM controls.
+
+## Features 🎛️
+
+- **Bongo Cat by default** — paws flapping in time with the beat. The classic Cat Jam and a custom webM URL are still selectable.
+- **Beat- & lyric-synced pulse** — the cat brightens and bounces on the beat, scaled by the track's danceability (dancier = punchier, chill = subtle). With the [Spicy Lyrics](https://github.com/spikerko/spicy-lyrics) extension installed it can pulse per **syllable** instead of the beat.
+- **Mirror cat** — an optional second, flipped cat mirrored across the play button; fully dynamic and flexes with the window.
+- **Multi-source BPM detection**, cascading and cached per track with visible provenance (*"BPM from …"*):
+  1. **ReccoBeats** by Spotify id — Spotify's catalog tempo
+  2. **ReccoBeats by ISRC** — resolved via Spotify metadata or **MusicBrainz**
+  3. **GetSongBPM** — optional, bring your own API key
+  4. **30s preview scan** — ReccoBeats analysis, as a last resort
+
+  Re-runnable from a per-song **Re-detect** menu.
+- **Per-song controls** — manual BPM override, double-time toggle, sync-delay nudge, and position offsets, all remembered per track.
+
+## Install 📦
+
+Not on the Marketplace — install the built extension manually:
+
+1. Copy [`marketplace/cat-jam.js`](marketplace/cat-jam.js) into your Spicetify `Extensions` folder ([finding it](https://spicetify.app/docs/advanced-usage/extensions/)).
+2. Enable and apply:
+   ```bash
+   spicetify config extensions cat-jam.js
+   spicetify apply
+   ```
+
+Or build from source: `npm install && npm run build` (via [spicetify-creator](https://github.com/spicetify/spicetify-creator)).
 
 ## Credits 🐈
 
-Maintained fork of [BlafKing/spicetify-cat-jam-synced](https://github.com/BlafKing/spicetify-cat-jam-synced) by [@BlafKing](https://github.com/BlafKing), who created the original extension and cat video. This fork modernizes the synchronization core (track-identity guards, timer lifecycle, tempo-only BPM) and keeps it compatible with current Spotify versions. MIT licensed.
+- Original extension + cat video: **[BlafKing/spicetify-cat-jam-synced](https://github.com/BlafKing/spicetify-cat-jam-synced)**.
+- Forked from **[caml07/spicetify-cat-jam-synced](https://github.com/caml07/spicetify-cat-jam-synced)** (modernized sync core, ReccoBeats tempo).
+- Optional BPM data by **[GetSongBPM](https://getsongbpm.com/)**.
+- MIT licensed.
 
 # Changelog 📋
+
+<h3>Bongo Cat Jam (this fork)</h3>
+
+- **Bongo Cat is now the default** video source.
+- **Beat-synced pulse**: the cat brightens and bounces on the beat, scaled exponentially by danceability/energy; brightness and bounce toggle independently with their own intensity.
+- **Lyric-synced pulse**: reads the [Spicy Lyrics](https://github.com/spikerko/spicy-lyrics) cache to pulse per syllable, with continuous polling so a cold track picks up sync mid-play; falls back to the beat when unavailable. When Spicy Lyrics is installed, its lyrics button replaces Spotify's.
+- **Mirror cat**: an optional flipped clone mirrored across the play button, driven in lock-step (top-level overlay, so it never covers the player controls).
+- **More BPM sources with provenance**: ISRC fallback via Spotify metadata / **MusicBrainz**, an optional **[GetSongBPM](https://getsongbpm.com/)** lookup (user API key), and a **Re-detect** menu to re-run a specific mechanism. Every detected value is saved tagged with where it came from and reused across plays.
+- Performance + correctness: 30fps dirty-checked animator, resize/seek-aware clock, and a full unit-test suite.
 
 <h3>v1.4.0</h3>
 
