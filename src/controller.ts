@@ -1,6 +1,6 @@
 import { computePlaybackRate, effectiveTempo } from "./tempo";
 import { nextBeatDelaySeconds, Beat } from "./beats";
-import { VideoPulse, depthFromStats } from "./pulse";
+import { VideoPulse, PulseOnset, depthFromStats } from "./pulse";
 
 export interface AnalysisResult {
   tempoBpm?: number;
@@ -9,6 +9,8 @@ export interface AnalysisResult {
   danceability?: number;
   /** Energy [0,1] — secondary pulse-intensity signal. */
   energy?: number;
+  /** Recording ISRC when the source exposes it; used to retry other releases. */
+  isrc?: string;
 }
 
 export interface CatJamConfig {
@@ -35,7 +37,7 @@ interface Deps {
   /** Optional beat-synced brightness/scale pulse driven off the felt tempo + danceability. */
   pulse?: VideoPulse;
   /** Optional onset source (e.g. lyric syllables) that drives the pulse instead of the beat. */
-  fetchOnsets?(uri: string): Promise<number[] | null>;
+  fetchOnsets?(uri: string): Promise<PulseOnset[] | null>;
 }
 
 const SEEK_THRESHOLD_MS = 500;
@@ -80,7 +82,7 @@ export class CatJamController {
 
   setVideo(video: HTMLVideoElement | null): void {
     this.video = video;
-    this.deps.pulse?.attach(video);
+    // The pulse's DOM (wrapper + overlays) is attached by app.tsx, which owns it.
     this.applyRate();
     this.updatePulseTrack();
   }
@@ -163,12 +165,13 @@ export class CatJamController {
     return effectiveTempo(this.tempoBpm, doubleTime);
   }
 
-  /** Push the current track's felt tempo + pulse depth to the pulse animator. */
+  /** Push the current track's felt tempo, pulse depth, and manual delay to the animator. */
   private updatePulseTrack(): void {
     if (!this.deps.pulse) return;
     // Non-track (podcast/local/none): depth 0 → the pulse rests at normal.
     const depth = this.currentUri ? depthFromStats(this.danceability, this.energy) : 0;
-    this.deps.pulse.setTrack(this.feltBpm(), depth);
+    const delayMs = this.currentUri ? this.deps.getDelayMs?.(this.currentUri) ?? 0 : 0;
+    this.deps.pulse.setTrack(this.feltBpm(), depth, delayMs);
   }
 
   private resync(progressMs: number, isPlaying: boolean): void {

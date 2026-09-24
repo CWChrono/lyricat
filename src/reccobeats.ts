@@ -32,14 +32,59 @@ export function parseFeature(body: unknown, key: "danceability" | "energy"): num
   return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : undefined;
 }
 
+/** Pull the recording's ISRC out of a features/track response, else null. */
+export function parseIsrc(body: unknown): string | null {
+  const v = (body as { content?: Array<{ isrc?: unknown }> })?.content?.[0]?.isrc;
+  return typeof v === "string" && v ? v : null;
+}
+
 /** Assemble an AnalysisResult from a features response, attaching stats when present. */
 function toAnalysis(body: unknown, tempoBpm: number): AnalysisResult {
   const result: AnalysisResult = { tempoBpm };
   const danceability = parseFeature(body, "danceability");
   const energy = parseFeature(body, "energy");
+  const isrc = parseIsrc(body);
   if (danceability !== undefined) result.danceability = danceability;
   if (energy !== undefined) result.energy = energy;
+  if (isrc) result.isrc = isrc;
   return result;
+}
+
+/** Outcome of one features request: a definitive answer (cacheable) or a transient failure. */
+type FeaturesOutcome =
+  | { definitive: true; result: AnalysisResult | null }
+  | { definitive: false };
+
+/**
+ * GET audio-features for a `ids` value (a Spotify track id *or* an ISRC — the
+ * endpoint accepts either). Retries transient failures (network / 5xx) up to
+ * `attempts`; a 200 (tempo or empty) or 4xx is definitive. On an ISRC, ReccoBeats
+ * returns every release of the recording; content[0] is representative since they
+ * share the recording's features.
+ */
+async function requestFeatures(
+  fetchFn: FetchLike,
+  sleep: (ms: number) => Promise<void>,
+  idsValue: string,
+  attempts: number
+): Promise<FeaturesOutcome> {
+  const url = `${AUDIO_FEATURES_ENDPOINT}?ids=${encodeURIComponent(idsValue)}`;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const res = await fetchFn(url);
+      if (res.ok) {
+        const body = await res.json();
+        const tempo = parseTempo(body);
+        return { definitive: true, result: tempo !== null ? toAnalysis(body, tempo) : null };
+      }
+      if (res.status < 500) return { definitive: true, result: null }; // 4xx (bad id / not found)
+      // 5xx: fall through and retry
+    } catch {
+      // network error: fall through and retry
+    }
+    await sleep(200);
+  }
+  return { definitive: false }; // transient failure
 }
 
 /**
@@ -61,29 +106,29 @@ export function createAnalysisFetcher(
     const id = spotifyIdFromUri(uri);
     if (!id) return null; // podcasts, local files, etc. — no tempo to fetch
 
-    const url = `${AUDIO_FEATURES_ENDPOINT}?ids=${encodeURIComponent(id)}`;
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      try {
-        const res = await fetchFn(url);
-        if (res.ok) {
-          const body = await res.json();
-          const tempo = parseTempo(body);
-          const result = tempo !== null ? toAnalysis(body, tempo) : null;
-          cache.set(uri, result); // definitive
-          return result;
-        }
-        if (res.status < 500) {
-          cache.set(uri, null); // 4xx (bad id / not found): don't hammer
-          return null;
-        }
-        // 5xx: fall through and retry
-      } catch {
-        // network error: fall through and retry
-      }
-      await sleep(200);
-    }
-    return null; // transient failure — uncached, a future play may succeed
+    const outcome = await requestFeatures(fetchFn, sleep, id, attempts);
+    if (!outcome.definitive) return null; // transient — uncached, a future play may succeed
+    cache.set(uri, outcome.result); // definitive (a tempo, or a genuine miss)
+    return outcome.result;
   };
+}
+
+/**
+ * Look a recording up by ISRC. ReccoBeats' `ids` param accepts an ISRC and
+ * returns features for every release of that recording — so this rescues tracks
+ * whose exact Spotify id isn't indexed but where a sibling pressing is. Returns
+ * null on a miss or transient failure; unlike the id fetcher it doesn't cache
+ * (the caller persists the resolved tempo as the track's detected value).
+ */
+export async function fetchAnalysisByIsrc(
+  fetchFn: FetchLike,
+  sleep: (ms: number) => Promise<void>,
+  isrc: string,
+  attempts = 3
+): Promise<AnalysisResult | null> {
+  if (!isrc) return null;
+  const outcome = await requestFeatures(fetchFn, sleep, isrc, attempts);
+  return outcome.definitive ? outcome.result : null;
 }
 
 // --- Preview-based fallback -------------------------------------------------

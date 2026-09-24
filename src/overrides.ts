@@ -11,13 +11,40 @@ export interface KeyValueStore {
 
 export const MAX_DELAY_MS = 500;
 
+/**
+ * Which method produced a track's `detectedBpm` (its provenance):
+ * - `reccobeats`         — ReccoBeats catalog features, by Spotify id (Spotify's tempo).
+ * - `reccobeats-isrc`    — ReccoBeats catalog features, via a sibling ISRC (from Spotify).
+ * - `reccobeats-isrc-mb` — same, but the ISRC was resolved through MusicBrainz.
+ * - `getsongbpm`         — GetSongBPM database (user API key; a real BPM source).
+ * - `preview`            — ReccoBeats analysis of the 30s preview clip (rough, unverified).
+ * A `manual` value lives in `bpm`, not here.
+ */
+export type BpmSource =
+  | "reccobeats"
+  | "reccobeats-isrc"
+  | "reccobeats-isrc-mb"
+  | "getsongbpm"
+  | "preview";
+const BPM_SOURCES: readonly BpmSource[] = [
+  "reccobeats",
+  "reccobeats-isrc",
+  "reccobeats-isrc-mb",
+  "getsongbpm",
+  "preview",
+];
+
 export interface TrackOverride {
   /** Human-readable "Song - Artist", stored for readability in the whitelist. */
   name?: string;
+  /** Recording ISRC, backpopulated from analysis; lets the ISRC tempo fallback run. */
+  isrc?: string;
   /** Manual BPM override; authoritative for playback when set. */
   bpm?: number;
   /** The auto-detected BPM, preserved even after a manual override so it can be reset to. */
   detectedBpm?: number;
+  /** How `detectedBpm` was found — undefined for pre-provenance entries (backfilled on rescan). */
+  bpmSource?: BpmSource;
   /** true = treat as double-time (halve), false = trust the raw tempo. */
   doubleTime?: boolean;
   /** Manual sync offset in ms [0, MAX_DELAY_MS] applied before the cat restarts. */
@@ -26,6 +53,10 @@ export interface TrackOverride {
 
 function isBpm(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+function isBpmSource(v: unknown): v is BpmSource {
+  return typeof v === "string" && (BPM_SOURCES as readonly string[]).includes(v);
 }
 
 function isDelay(v: unknown): v is number {
@@ -52,10 +83,13 @@ export function readOverrides(store: KeyValueStore): Record<string, TrackOverrid
         out[id] = { doubleTime: value }; // legacy format
       } else if (value && typeof value === "object") {
         const entry: TrackOverride = {};
-        const { name, bpm, detectedBpm, doubleTime, delayMs } = value as TrackOverride;
+        const { name, isrc, bpm, detectedBpm, bpmSource, doubleTime, delayMs } =
+          value as TrackOverride;
         if (typeof name === "string" && name) entry.name = name;
+        if (typeof isrc === "string" && isrc) entry.isrc = isrc;
         if (isBpm(bpm)) entry.bpm = bpm;
         if (isBpm(detectedBpm)) entry.detectedBpm = detectedBpm;
+        if (entry.detectedBpm !== undefined && isBpmSource(bpmSource)) entry.bpmSource = bpmSource;
         if (typeof doubleTime === "boolean") entry.doubleTime = doubleTime;
         if (isDelay(delayMs)) entry.delayMs = clampDelay(delayMs);
         out[id] = entry;
@@ -82,8 +116,12 @@ function writeOverride(
   // Reconstruct with a stable, readable field order (name first).
   const ordered: TrackOverride = {};
   if (merged.name !== undefined) ordered.name = merged.name;
+  if (merged.isrc !== undefined) ordered.isrc = merged.isrc;
   if (merged.bpm !== undefined) ordered.bpm = merged.bpm;
   if (merged.detectedBpm !== undefined) ordered.detectedBpm = merged.detectedBpm;
+  if (merged.detectedBpm !== undefined && merged.bpmSource !== undefined) {
+    ordered.bpmSource = merged.bpmSource; // provenance only meaningful with a detected value
+  }
   if (merged.doubleTime !== undefined) ordered.doubleTime = merged.doubleTime;
   if (merged.delayMs !== undefined) ordered.delayMs = merged.delayMs;
   all[id] = ordered;
@@ -94,6 +132,15 @@ function writeOverride(
 /** Persist the "Song - Artist" label for a track. */
 export function setTrackName(store: KeyValueStore, id: string, name: string): void {
   if (name) writeOverride(store, id, { name });
+}
+
+/**
+ * Persist a track's ISRC (backpopulating older whitelist entries). Pure metadata,
+ * like `name`: recorded when analysis discovers it so a later id-lookup miss can
+ * retry the recording by ISRC without re-resolving it.
+ */
+export function setIsrc(store: KeyValueStore, id: string, isrc: string): void {
+  if (isrc) writeOverride(store, id, { isrc });
 }
 
 /** Delete a track's entry from the whitelist. Returns true if one was removed. */
@@ -133,9 +180,18 @@ export function setStoredBpm(store: KeyValueStore, id: string, bpm: number): voi
   if (isBpm(bpm)) writeOverride(store, id, { bpm });
 }
 
-/** Persist the auto-detected BPM for a track (kept even when bpm is overridden). */
-export function setDetectedBpm(store: KeyValueStore, id: string, bpm: number): void {
-  if (isBpm(bpm)) writeOverride(store, id, { detectedBpm: bpm });
+/**
+ * Persist the auto-detected BPM for a track (kept even when bpm is overridden),
+ * tagged with the method that found it. Also lets replays reuse it instead of
+ * re-hitting the APIs.
+ */
+export function setDetectedBpm(
+  store: KeyValueStore,
+  id: string,
+  bpm: number,
+  source?: BpmSource
+): void {
+  if (isBpm(bpm)) writeOverride(store, id, source ? { detectedBpm: bpm, bpmSource: source } : { detectedBpm: bpm });
 }
 
 /**

@@ -15,12 +15,15 @@ import {
 } from "./tempo";
 import {
   createAnalysisFetcher,
+  fetchAnalysisByIsrc,
   spotifyIdFromUri,
   fetchTempoViaPreview,
   PreviewDeps,
 } from "./reccobeats";
 import {
   KeyValueStore,
+  TrackOverride,
+  BpmSource,
   readOverrides,
   getOverride,
   setStoredBpm,
@@ -28,6 +31,7 @@ import {
   clearStoredBpm,
   setDelayMs,
   setTrackName,
+  setIsrc,
   flipDoubleTime,
   clearDoubleTime,
   removeOverride,
@@ -38,6 +42,8 @@ import {
 import { BONGOCAT_VIDEO_URL } from "./resources/bongocat";
 import { createVideoPulse, PulseConfig } from "./pulse";
 import { createSpicyOnsetReader } from "./spicylyrics";
+import { fetchIsrcByText } from "./musicbrainz";
+import { fetchGetSongBpm } from "./bpmproviders";
 
 // Per-track overrides (bpm / double-time / delay) live in Spicetify LocalStorage.
 const overridesStore: KeyValueStore = {
@@ -62,6 +68,73 @@ async function getPreviewUrl(id: string): Promise<string | null> {
     if (typeof url === "string" && url.startsWith("http")) return url;
   } catch {
     /* no preview available for this track */
+  }
+  return null;
+}
+
+/** Depth-first scan for an `isrc`-keyed string in an arbitrary response object. */
+function findIsrc(node: unknown, depth = 0): string | null {
+  if (!node || typeof node !== "object" || depth > 6) return null;
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key.toLowerCase() === "isrc" && typeof value === "string" && value) return value;
+    const nested = findIsrc(value, depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+// MusicBrainz asks for <=1 request/sec per IP. Our lookups are rare (only on an
+// id miss with no in-client ISRC) and cached per track, but rapid track-skipping
+// could still burst them — so serialize through a chain that holds each slot for
+// MB_MIN_GAP_MS after a request completes. The returned value isn't delayed; only
+// the *next* queued lookup waits.
+const MB_MIN_GAP_MS = 1100;
+let mbGate: Promise<unknown> = Promise.resolve();
+function musicBrainzIsrc(title: string, artist?: string): Promise<string | null> {
+  const run = mbGate.then(() => fetchIsrcByText((url) => fetch(url), title, artist));
+  // Reopen the gate MB_MIN_GAP_MS after this request settles (success or failure).
+  mbGate = run.then(
+    () => sleep(MB_MIN_GAP_MS),
+    () => sleep(MB_MIN_GAP_MS)
+  );
+  return run.catch(() => null);
+}
+
+/**
+ * Best-effort ISRC lookup for a track. When ReccoBeats has no features for the
+ * exact Spotify id, the same recording may be indexed under another release —
+ * the ISRC finds it. Sources, cheapest first: the loaded track's metadata (free),
+ * Pathfinder GraphQL, then a MusicBrainz title+artist search (`hint`). Returns
+ * null when none expose an ISRC, in which case the caller falls back to preview
+ * analysis — so this is purely additive and an absent ISRC never regresses.
+ */
+// An ISRC plus where it came from — Spotify metadata vs a MusicBrainz search — so
+// the tempo it unlocks can record the fuller provenance.
+type IsrcResult = { isrc: string; via: "spotify" | "musicbrainz" };
+
+async function getIsrc(
+  id: string,
+  hint?: { title: string; artist?: string } | null
+): Promise<IsrcResult | null> {
+  const item = Spicetify.Player?.data?.item as any;
+  if (item && spotifyIdFromUri(item.uri) === id) {
+    const fromItem = findIsrc(item.external_ids) ?? findIsrc(item.metadata);
+    if (fromItem) return { isrc: fromItem, via: "spotify" };
+  }
+  const gql = (Spicetify as any).GraphQL;
+  try {
+    const def = gql?.Definitions?.getTrack ?? gql?.Definitions?.trackMetadata;
+    if (def) {
+      const res = await gql.Request(def, { uri: `spotify:track:${id}` });
+      const fromGql = findIsrc(res?.data);
+      if (fromGql) return { isrc: fromGql, via: "spotify" };
+    }
+  } catch {
+    /* no metadata available for this track */
+  }
+  if (hint?.title) {
+    const fromMb = await musicBrainzIsrc(hint.title, hint.artist);
+    if (fromMb) return { isrc: fromMb, via: "musicbrainz" };
   }
   return null;
 }
@@ -100,21 +173,28 @@ const VIDEO_SOURCE_FIELD = "catjam-video-source";
 // Beat-synced pulse: brighten and/or bounce the cat on the beat, scaled by how
 // danceable the track is. The two effects toggle independently.
 const PULSE_BRIGHTNESS_FIELD = "catjam-pulse-brightness";
+const PULSE_BRIGHTNESS_INTENSITY_FIELD = "catjam-pulse-brightness-intensity";
 const PULSE_SCALE_FIELD = "catjam-pulse-scale";
-const PULSE_INTENSITY_FIELD = "catjam-pulse-intensity";
+const PULSE_SCALE_INTENSITY_FIELD = "catjam-pulse-scale-intensity";
 const PULSE_LYRIC_FIELD = "catjam-pulse-lyricsync";
 
 function lyricSyncEnabled(): boolean {
   return settings.getFieldValue(PULSE_LYRIC_FIELD) === true;
 }
 
+/** Read a 0-100 intensity field as a 0..1 fraction, defaulting to 0.7. */
+function intensityFraction(field: string): number {
+  const raw = Number(settings.getFieldValue(field));
+  return Math.min(1, Math.max(0, (Number.isFinite(raw) ? raw : 70) / 100));
+}
+
 function getPulseConfig(): PulseConfig {
-  const intensity = Number(settings.getFieldValue(PULSE_INTENSITY_FIELD));
   return {
     // Default ON: only an explicit false disables (guards the pre-load default).
     brightness: settings.getFieldValue(PULSE_BRIGHTNESS_FIELD) !== false,
     scale: settings.getFieldValue(PULSE_SCALE_FIELD) !== false,
-    intensity: Math.min(1, Math.max(0, (Number.isFinite(intensity) ? intensity : 70) / 100)),
+    brightnessIntensity: intensityFraction(PULSE_BRIGHTNESS_INTENSITY_FIELD),
+    scaleIntensity: intensityFraction(PULSE_SCALE_INTENSITY_FIELD),
   };
 }
 
@@ -125,10 +205,54 @@ function getPulseConfig(): PulseConfig {
 const BONGO_DEFAULT_BPM = 600;
 const BONGO_MIN_RATE = 0.1;
 const BONGO_MAX_RATE = 0.35;
-// Nudge into place and force it above every overlay (max z-index). `position`
-// is added per-slot in mountVideo so z-index applies without breaking the
-// absolutely-positioned left-library layout.
-const BONGO_EXTRA_STYLE = "margin-right: 10px; transform: translateY(15px); z-index: 2147483647;";
+// Position fine-tuning: a translate offset (px) applied to the cat's rest
+// transform. The pulse composes its bounce on top, so the offset survives it.
+const POSITION_X_FIELD = "catjam-webm-offset-x";
+const POSITION_Y_FIELD = "catjam-webm-offset-y";
+
+/** The rest transform from the X/Y offset settings, or "" when both are 0. */
+function positionTransform(): string {
+  const x = Number(settings.getFieldValue(POSITION_X_FIELD)) || 0;
+  const y = Number(settings.getFieldValue(POSITION_Y_FIELD)) || 0;
+  return x || y ? `translate(${x}px, ${y}px)` : "";
+}
+
+// Optional mirror cat: a horizontally-flipped duplicate placed beside the main
+// with an adjustable gap. Driven in lock-step by the pulse (same brightness +
+// bounce, playback frame-locked), so the two cats stay in sync.
+const MIRROR_ID = "catjam-webm-mirror";
+// The main cat lives inside a positioning wrapper sized to the cat only, so the
+// mirror (absolutely positioned inside it) can sit at a distance without ever
+// reflowing/moving the original.
+const WRAP_ID = "catjam-webm-wrap";
+const MIRROR_ENABLED_FIELD = "catjam-mirror-enabled";
+
+// Both bottom-player overlays anchor to the transport (symmetric around the play
+// button) — set by mountVideo / mountMirror, called on resize / song change to keep
+// them aligned as the bar reflows. Null when the cat is in the left library.
+let reanchorOverlay: (() => void) | null = null;
+let reanchorMirror: (() => void) | null = null;
+
+function mirrorEnabled(): boolean {
+  return settings.getFieldValue(MIRROR_ENABLED_FIELD) === true;
+}
+
+function isBottomPlayerPosition(): boolean {
+  return String(settings.getFieldValue("catjam-webm-position") || "") === "Bottom (Player)";
+}
+
+/**
+ * The mirror's rest transform: the position offset (X **inverted**) + a horizontal
+ * flip. The play button is the axis of symmetry, so X pushes the pair apart/together
+ * (main +X → mirror −X); Y moves both the same way. The flip is composed by the
+ * pulse's bounce about a center-bottom pivot, so it flips in place.
+ */
+function mirrorBaseTransform(): string {
+  const x = Number(settings.getFieldValue(POSITION_X_FIELD)) || 0;
+  const y = Number(settings.getFieldValue(POSITION_Y_FIELD)) || 0;
+  const offset = x || y ? `translate(${-x}px, ${y}px) ` : "";
+  return `${offset}scaleX(-1)`;
+}
 
 function currentSource(): string {
   return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
@@ -166,6 +290,13 @@ function labelFor(uri: string | undefined): string | undefined {
   if (!item || item.uri !== uri) return undefined;
   const artist = item.artists?.[0]?.name;
   return artist ? `${item.name} - ${artist}` : item.name || undefined;
+}
+
+/** Structured title/artist for the loaded track (for a MusicBrainz search), else null. */
+function nameArtistFor(uri: string | undefined): { title: string; artist?: string } | null {
+  const item = Spicetify.Player.data?.item;
+  if (!item || item.uri !== uri || !item.name) return null;
+  return { title: item.name, artist: item.artists?.[0]?.name };
 }
 
 /** Persist the "Song - Artist" label for a track when we can determine it. */
@@ -277,6 +408,11 @@ let whitelistSearch = ""; // preserved across re-renders so typing survives refr
 // in main().
 let analyze: ((uri: string) => Promise<AnalysisResult | null>) | undefined;
 let catController: CatJamController | undefined; // set in main(), for the panel's per-song controls
+// Force a fresh detection via a chosen mechanism (or the default cascade), bypassing
+// the cache; persists + tags the result. Set in main(), used by the rescan dropdown.
+let redetect:
+  | ((mechanism: RedetectMechanism, uri: string) => Promise<{ bpm: number; source: BpmSource } | null>)
+  | undefined;
 let nowPlayingBpm: { id: string; bpm?: number } = { id: "" };
 
 /** The full whitelist JSON (Song Library view). */
@@ -289,6 +425,41 @@ function fullListText(): string {
 
 /** The current song's effective stats (Currently Playing card). Mirrors the
  *  card shown when a search result is selected. */
+// Provenance of a track's detected BPM, shown in the Currently Playing card + the
+// rescan menu. A manual value (`o.bpm`) is labelled separately.
+const BPM_SOURCE_LABEL: Record<BpmSource, string> = {
+  reccobeats: "ReccoBeats (Spotify catalog)",
+  "reccobeats-isrc": "ReccoBeats (ISRC match)",
+  "reccobeats-isrc-mb": "ReccoBeats (ISRC via MusicBrainz)",
+  getsongbpm: "GetSongBPM",
+  preview: "preview scan — unverified",
+};
+
+// Optional GetSongBPM provider, gated on a user-supplied API key in settings.
+const GETSONGBPM_KEY_FIELD = "catjam-getsongbpm-key";
+const providerKey = (field: string): string => String(settings.getFieldValue(field) || "").trim();
+
+/** Tempo provenance for an ISRC-matched BPM, by where the ISRC came from. */
+function isrcSource(via: "spotify" | "musicbrainz"): BpmSource {
+  return via === "musicbrainz" ? "reccobeats-isrc-mb" : "reccobeats-isrc";
+}
+
+/** How to re-run detection: a single mechanism, or the full default cascade. */
+type RedetectMechanism = BpmSource | "default";
+
+/** Human-readable provenance line for a track's effective BPM ("BPM from …"). */
+function bpmStatusLabel(o: TrackOverride | undefined): string {
+  if (o?.bpm != null) return "BPM from manual override";
+  if (o?.detectedBpm != null) {
+    return o.bpmSource
+      ? `BPM from ${BPM_SOURCE_LABEL[o.bpmSource]}`
+      : "BPM from an earlier scan (source not recorded — re-detect to label)";
+  }
+  // Reached only transiently (a value resolved this session that isn't persisted —
+  // e.g. removed from the library while still playing); every detection is saved.
+  return "BPM from this session (not in library — re-detect to save)";
+}
+
 function nowPlayingCardText(): string {
   const item = Spicetify.Player.data?.item;
   const id = spotifyIdFromUri(item?.uri);
@@ -310,9 +481,7 @@ function nowPlayingCardText(): string {
   }
   if (o?.delayMs) display.delayMs = o.delayMs;
 
-  const status =
-    o?.bpm != null ? "manual BPM override" : o ? "detected (in whitelist)" : "detected (not saved)";
-  return head + JSON.stringify(display, null, 2) + `\n\n${status}`;
+  return head + JSON.stringify(display, null, 2) + `\n\n${bpmStatusLabel(o)}`;
 }
 
 function whitelistButton(label: string, onClick: () => void): HTMLButtonElement {
@@ -597,7 +766,45 @@ function perSongControls(host: HTMLElement, card: HTMLElement): HTMLElement {
     })
   );
 
-  wrap.append(delayRow, controlsRow);
+  // Re-detect: pick a mechanism (or the default cascade) and force a fresh scan,
+  // bypassing the cached value. Persists + tags the result and re-syncs the cat.
+  const rescanRow = document.createElement("div");
+  rescanRow.setAttribute("style", "display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;");
+  const mechanism = document.createElement("select");
+  mechanism.setAttribute("style", `${FIELD_STYLE} cursor: pointer;`);
+  const MECHANISMS: Array<{ value: RedetectMechanism; label: string }> = [
+    { value: "default", label: "Default cascade (id → ISRC → providers → preview)" },
+    { value: "reccobeats", label: "ReccoBeats (Spotify id)" },
+    { value: "reccobeats-isrc", label: "ReccoBeats (ISRC — Spotify / MusicBrainz)" },
+    { value: "getsongbpm", label: "GetSongBPM (needs API key)" },
+    { value: "preview", label: "Preview scan (unverified)" },
+  ];
+  for (const m of MECHANISMS) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.label;
+    mechanism.appendChild(opt);
+  }
+  const rescan = whitelistButton("Re-detect BPM", () => {
+    if (!redetect) return;
+    const choice = mechanism.value as RedetectMechanism;
+    rescan.disabled = true;
+    rescan.textContent = "Detecting…";
+    void redetect(choice, uri!)
+      .then((found) => {
+        Spicetify.showNotification(
+          found
+            ? `Cat-Jam: ${Math.round(found.bpm)} BPM via ${BPM_SOURCE_LABEL[found.source]}`
+            : "Cat-Jam: that method found no BPM",
+          !found
+        );
+        if (found) apply(); // re-sync the cat to the freshly detected tempo
+      })
+      .finally(() => renderWhitelistInto(host)); // redraw with the new value/label
+  });
+  rescanRow.append(mechanism, rescan);
+
+  wrap.append(delayRow, controlsRow, rescanRow);
   return wrap;
 }
 
@@ -688,71 +895,221 @@ async function setupWhitelistPreview(): Promise<void> {
   }
 }
 
-/** Mounts the video into the first available container; null if UI changed shape. */
-async function mountVideo(): Promise<HTMLVideoElement | null> {
-  const existing = document.getElementById(VIDEO_ID);
-  if (existing) existing.remove();
-
-  const position = String(settings.getFieldValue("catjam-webm-position") || "");
-  const isBottomPlayer = position === "Bottom (Player)";
-  const selector = isBottomPlayer ? BOTTOM_PLAYER_SELECTOR : LEFT_LIBRARY_SELECTOR;
-
-  const leftSize =
-    Number(settings.getFieldValue("catjam-webm-position-left-size")) || 100;
-  const baseStyle = isBottomPlayer
-    ? "width: 65px; height: 65px;"
-    : `width: ${leftSize}%; max-width: 300px; height: auto; max-height: 100%; position: absolute; bottom: 0; pointer-events: none; z-index: 1;`;
-  const style =
-    currentSource() === VIDEO_SOURCES.BONGO
-      ? // bottom-player slot is statically positioned, so add position:relative
-        // there for z-index to take effect; the left library is already absolute.
-        `${baseStyle} ${BONGO_EXTRA_STYLE}${isBottomPlayer ? " position: relative;" : ""}`
-      : baseStyle;
-
+/** Common video-element setup (loop, muted, source). Style is set by the caller. */
+function makeCatVideo(id: string): HTMLVideoElement {
   const video = document.createElement("video");
-  video.id = VIDEO_ID;
+  video.id = id;
   video.loop = true;
   video.muted = true;
   video.playsInline = true;
   video.preload = "auto";
   video.setAttribute("aria-hidden", "true");
-  video.setAttribute("style", style);
   video.src = getConfig().videoUrl;
+  return video;
+}
 
-  let container = document.querySelector(selector);
+/** The main cat's own style inside the wrapper (size + rest transform offset). */
+function mainCatStyle(isBottomPlayer: boolean): string {
+  const offset = positionTransform();
+  const t = offset ? ` transform: ${offset};` : "";
+  return isBottomPlayer
+    ? `width: 65px; height: 65px; display: block;${t}`
+    : `width: 100%; height: auto; display: block;${t}`;
+}
 
-  if (!container) {
-    console.log("[CAT-JAM] Waiting for player UI via observer...");
-    container = await new Promise<Element | null>((resolve) => {
-      const observer = new MutationObserver(() => {
-        const found = document.querySelector(selector);
-        if (found) {
-          cleanup();
-          resolve(found);
-        }
-      });
-      const timeout = setTimeout(() => {
-        cleanup();
-        resolve(null);
-      }, OBSERVER_TIMEOUT_MS);
-      const cleanup = () => {
-        observer.disconnect();
-        clearTimeout(timeout);
-      };
-      observer.observe(document.body, { childList: true, subtree: true });
-    });
+/** Left-library mirror: an absolute clone a fixed gap to the right of the main. */
+function mirrorPlacement(): string {
+  return "position: absolute; bottom: 0; left: calc(100% + 12px);";
+}
+
+/**
+ * Mount the mirror cat as an absolutely-positioned clone inside the wrapper, or
+ * remove it / no-op when disabled. It's a full second video (same source), driven
+ * in lock-step by the pulse (see `pulse.setMirror`) so it inherits every behavior.
+ */
+function mountMirror(main: HTMLVideoElement): HTMLVideoElement | null {
+  document.getElementById(MIRROR_ID)?.remove();
+  reanchorMirror = null;
+  if (!mirrorEnabled()) return null;
+  const mirror = makeCatVideo(MIRROR_ID);
+
+  if (isBottomPlayerPosition()) {
+    // Its own top-level overlay, mirrored across the play button from the main —
+    // fully dynamic (tracks the transport, flexes with the window), no fixed gap.
+    mirror.setAttribute(
+      "style",
+      `position: fixed; pointer-events: none; z-index: 9999; width: 65px; height: 65px; display: block; transform: ${mirrorBaseTransform()};`
+    );
+    document.body.appendChild(mirror);
+    reanchorMirror = () => anchorBottomMirror(mirror);
+    reanchorMirror();
+    requestAnimationFrame(() => reanchorMirror?.());
+  } else {
+    // Left library: an absolute clone a fixed gap right of the main, in its wrapper.
+    const wrapper = main.parentElement;
+    if (!wrapper) return null;
+    mirror.setAttribute(
+      "style",
+      `width: 100%; height: auto; ${mirrorPlacement()} transform: ${mirrorBaseTransform()}; pointer-events: none;`
+    );
+    wrapper.appendChild(mirror);
   }
 
+  if (Spicetify.Player.isPlaying()) safePlay(mirror);
+  return mirror;
+}
+
+/** Resolve an element by selector, waiting (via observer) up to the timeout. */
+async function waitForElement(selector: string): Promise<Element | null> {
+  const now = document.querySelector(selector);
+  if (now) return now;
+  console.log("[CAT-JAM] Waiting for player UI via observer...");
+  return new Promise<Element | null>((resolve) => {
+    const observer = new MutationObserver(() => {
+      const found = document.querySelector(selector);
+      if (found) {
+        cleanup();
+        resolve(found);
+      }
+    });
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, OBSERVER_TIMEOUT_MS);
+    const cleanup = () => {
+      observer.disconnect();
+      clearTimeout(timeout);
+    };
+    observer.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
+// Both cats anchor to the transport buttons row (shuffle…loop, centered on the play
+// button): the main just to its right, the mirror symmetrically to its left, each
+// vertically centered on the row. Tracking the centered transport makes them a
+// symmetric pair that flexes with the window — no manual distance.
+const CAT_PX = 65;
+const TRANSPORT_GAP_PX = 8;
+
+/** The transport buttons row (centered on the play button), or a fallback. */
+function findTransport(): Element | null {
+  return (
+    document.querySelector(".player-controls__buttons") ??
+    document.querySelector('[data-testid="control-button-playpause"]')?.parentElement ??
+    document.querySelector(".main-nowPlayingBar-center")
+  );
+}
+
+/** `top` (px) that vertically centers a cat on the transport row `r`. */
+function transportTop(r: DOMRect): number {
+  return Math.round(r.top + r.height / 2 - CAT_PX / 2);
+}
+
+function anchorBottomOverlay(wrapper: HTMLElement): void {
+  const t = findTransport();
+  if (!t) return;
+  const r = t.getBoundingClientRect();
+  if (!r.width) return; // not laid out yet
+  wrapper.style.left = `${Math.round(r.right + TRANSPORT_GAP_PX)}px`;
+  wrapper.style.right = "";
+  wrapper.style.top = `${transportTop(r)}px`;
+  wrapper.style.bottom = "";
+}
+
+function anchorBottomMirror(mirror: HTMLElement): void {
+  const t = findTransport();
+  if (!t) {
+    console.warn("[CAT-JAM] mirror: transport not found; can't anchor");
+    return;
+  }
+  const r = t.getBoundingClientRect();
+  if (!r.width) return;
+  mirror.style.right = `${Math.round(window.innerWidth - (r.left - TRANSPORT_GAP_PX))}px`;
+  mirror.style.left = "";
+  mirror.style.top = `${transportTop(r)}px`;
+  mirror.style.bottom = "";
+}
+
+// When the Spicy Lyrics extension is installed, its lyrics button replaces
+// Spotify's built-in one: slot the Spicy button (`#SpicyLyrics_PopupLyricsButton`)
+// in where the Spotify lyrics button (`[data-testid="lyrics-button"]`) sits, and
+// hide the built-in. No-op when Spicy Lyrics isn't present; idempotent.
+const SPICY_LYRICS_BTN_ID = "SpicyLyrics_PopupLyricsButton";
+const SPOTIFY_LYRICS_SELECTOR = '[data-testid="lyrics-button"]';
+let spicyRelocateObserver: MutationObserver | null = null;
+
+function relocateSpicyLyricsIcon(): void {
+  const spicy = document.getElementById(SPICY_LYRICS_BTN_ID);
+  const spotify = document.querySelector(SPOTIFY_LYRICS_SELECTOR) as HTMLElement | null;
+  if (!spicy || !spotify?.parentElement) return; // Spicy Lyrics absent → leave the UI alone
+  if (spotify.previousElementSibling !== spicy) {
+    spotify.parentElement.insertBefore(spicy, spotify); // Spicy takes the lyrics slot
+  }
+  if (spotify.style.display !== "none") spotify.style.display = "none"; // hide the built-in
+}
+
+/** Apply the swap and keep it applied as the bar reflows / Spicy Lyrics loads late. */
+function setupSpicyLyricsRelocation(): void {
+  relocateSpicyLyricsIcon();
+  const bar = document.querySelector(BOTTOM_PLAYER_SELECTOR);
+  if (!bar) return;
+  // Re-establish on the current bar (covers Spotify rebuilding it); the callback is
+  // idempotent so its own DOM edits don't loop the observer.
+  spicyRelocateObserver?.disconnect();
+  spicyRelocateObserver = new MutationObserver(() => relocateSpicyLyricsIcon());
+  spicyRelocateObserver.observe(bar, { childList: true, subtree: true });
+}
+
+/**
+ * Mounts the cat. In the bottom player it's a **top-level fixed overlay** (added to
+ * <body>, pointer-events:none), anchored beside the transport — so it never pushes,
+ * clips, squeezes, or blocks the player's own controls. In the left library it's an
+ * in-flow absolute child of the library container. Returns the main video, or null.
+ */
+async function mountVideo(): Promise<HTMLVideoElement | null> {
+  document.getElementById(WRAP_ID)?.remove();
+  document.getElementById(VIDEO_ID)?.remove(); // stray (older builds inserted the bare video)
+  document.getElementById(MIRROR_ID)?.remove();
+  reanchorOverlay = null;
+
+  const isBottomPlayer = isBottomPlayerPosition();
+  const container = await waitForElement(
+    isBottomPlayer ? BOTTOM_PLAYER_SELECTOR : LEFT_LIBRARY_SELECTOR
+  );
   if (!container) {
     console.warn("[CAT-JAM] Player container not found; cat-jam disabled cleanly.");
     return null;
   }
 
-  // Dedupe here (not at function start): parallel mounts both pass the
-  // early check, so whoever inserts second must clear the first.
-  document.getElementById(VIDEO_ID)?.remove();
+  const video = makeCatVideo(VIDEO_ID);
+  video.setAttribute("style", mainCatStyle(isBottomPlayer));
 
-  container.insertBefore(video, container.firstChild);
+  const wrapper = document.createElement("div");
+  wrapper.id = WRAP_ID;
+  wrapper.setAttribute("aria-hidden", "true");
+  wrapper.appendChild(video);
+
+  // Dedupe here (not at function start): parallel mounts both pass the wait, so
+  // whoever inserts second must clear the first.
+  document.getElementById(WRAP_ID)?.remove();
+
+  if (isBottomPlayer) {
+    // Top-level overlay: out of the control row entirely. Fixed + pointer-events:none
+    // → it can't move, clip, or block the icons; clicks pass straight through.
+    wrapper.setAttribute("style", "position: fixed; pointer-events: none; z-index: 9999;");
+    document.body.appendChild(wrapper);
+    reanchorOverlay = () => anchorBottomOverlay(wrapper);
+    reanchorOverlay();
+    requestAnimationFrame(() => reanchorOverlay?.()); // re-measure once layout settles
+  } else {
+    const leftSize = Number(settings.getFieldValue("catjam-webm-position-left-size")) || 100;
+    wrapper.setAttribute(
+      "style",
+      `position: absolute; bottom: 0; left: 0; width: ${leftSize}%; max-width: 300px; pointer-events: none; z-index: 1;`
+    );
+    container.insertBefore(wrapper, container.firstChild);
+  }
+
   if (Spicetify.Player.isPlaying()) safePlay(video);
   return video;
 }
@@ -767,23 +1124,87 @@ async function main() {
   // from ReccoBeats. The id lookup covers most tracks; anything it misses falls
   // back to a stored value (from the preview analysis run via the buttons).
   const liveFetch = createAnalysisFetcher((url) => fetch(url), sleep);
+  // The ReccoBeats features endpoint accepts a Spotify id *or* an ISRC; this is a
+  // non-cached fetch by either (the caller persists the result).
+  const featuresFetch = (ids: string) => fetchAnalysisByIsrc((url) => fetch(url), sleep, ids);
+
+  /** Persist a detected value (bpm + provenance + name), so replays skip the APIs. */
+  const cacheDetected = (id: string, bpm: number, source: BpmSource, uri: string): void => {
+    setDetectedBpm(overridesStore, id, bpm, source);
+    const label = labelFor(uri);
+    if (label) setTrackName(overridesStore, id, label);
+  };
+
+  const fetchLike = (url: string, init?: RequestInit) => fetch(url, init);
+  /**
+   * Optional GetSongBPM provider — skipped without an API key. Returns a hit or null.
+   */
+  const runProviders = async (
+    hint: { title: string; artist?: string } | null
+  ): Promise<{ bpm: number; source: BpmSource } | null> => {
+    if (!hint?.title) return null;
+    const gs = providerKey(GETSONGBPM_KEY_FIELD);
+    if (gs) {
+      const b = await fetchGetSongBpm(fetchLike, gs, hint.title, hint.artist);
+      if (b) return { bpm: b, source: "getsongbpm" };
+    }
+    return null;
+  };
+
   const resolveAnalysis = async (uri: string): Promise<AnalysisResult | null> => {
     const id = spotifyIdFromUri(uri);
     const o = id ? getOverride(overridesStore, id) : undefined;
-    // 1) Manual override wins; else a cached detected value (preview result).
+    // 1) Manual override wins; else a cached detected value (any prior detection).
     const effective = o?.bpm ?? o?.detectedBpm;
     if (effective) return { tempoBpm: effective };
-    // 2) ReccoBeats id lookup (Spotify's tempo) covers most tracks.
+    // 2) ReccoBeats id lookup (Spotify's tempo) covers most tracks. Persist it now
+    //    (tagged), so subsequent plays reuse it instead of re-hitting ReccoBeats.
     const live = await liveFetch(uri);
-    if (live?.tempoBpm) return live;
+    if (id && live?.isrc) setIsrc(overridesStore, id, live.isrc); // primes the ISRC fallback
+    if (live?.tempoBpm) {
+      if (id) cacheDetected(id, live.tempoBpm, "reccobeats", uri);
+      return live;
+    }
     if (!id) return live;
-    // 3) Missing from ReccoBeats: analyse the 30s preview once (rough), cache it
-    //    as the detected value.
-    const label = labelFor(uri); // capture now; the current track may change during analysis
+
+    const hint = nameArtistFor(uri); // capture now; the track may change during the async work
+
+    // 3) Id miss: the exact pressing isn't in ReccoBeats, but another release of
+    //    the same recording may be. Resolve the ISRC (stored first, else from
+    //    Spotify metadata / MusicBrainz — backpopulating the whitelist) and look
+    //    it up by ISRC. Only when no ISRC is available do we skip straight to
+    //    preview analysis.
+    // A stored / id-lookup ISRC is Spotify-origin; only a fresh getIsrc may be MB.
+    let isrc = o?.isrc ?? live?.isrc ?? null;
+    let isrcVia: IsrcResult["via"] = "spotify";
+    if (!isrc) {
+      const resolved = await getIsrc(id, hint);
+      if (resolved) {
+        isrc = resolved.isrc;
+        isrcVia = resolved.via;
+        setIsrc(overridesStore, id, isrc);
+      }
+    }
+    if (isrc) {
+      const byIsrc = await featuresFetch(isrc);
+      if (byIsrc?.tempoBpm) {
+        cacheDetected(id, byIsrc.tempoBpm, isrcSource(isrcVia), uri);
+        return byIsrc;
+      }
+    }
+
+    // 4) Optional GetSongBPM lookup (if an API key is set).
+    const prov = await runProviders(hint);
+    if (prov) {
+      cacheDetected(id, prov.bpm, prov.source, uri);
+      return { tempoBpm: prov.bpm };
+    }
+
+    // 5) Still nothing: analyse the 30s preview once (rough), cache it as the
+    //    detected value.
     const bpm = await fetchTempoViaPreview(id, previewDeps);
     if (bpm) {
-      setDetectedBpm(overridesStore, id, bpm);
-      if (label) setTrackName(overridesStore, id, label);
+      cacheDetected(id, bpm, "preview", uri);
       return { tempoBpm: bpm };
     }
     return live; // null — no preview available / analysis failed
@@ -801,21 +1222,76 @@ async function main() {
   };
   analyze = fetchAnalysis;
 
+  // Force a fresh detection, bypassing the cached/override value. `default` runs the
+  // normal cascade (id → ISRC → preview); a specific mechanism runs only that hop.
+  // Persists + tags the result and busts the in-memory features cache so playback
+  // picks it up. Returns the new value, or null if that mechanism found nothing.
+  redetect = async (mechanism, uri) => {
+    const id = spotifyIdFromUri(uri);
+    if (!id) return null;
+    const hint = nameArtistFor(uri);
+    const wants = (m: RedetectMechanism) => mechanism === "default" || mechanism === m;
+    let found: { bpm: number; source: BpmSource } | null = null;
+
+    if (wants("reccobeats")) {
+      const a = await featuresFetch(id); // non-cached id lookup
+      if (a?.isrc) setIsrc(overridesStore, id, a.isrc);
+      if (a?.tempoBpm) found = { bpm: a.tempoBpm, source: "reccobeats" };
+    }
+    if (!found && wants("reccobeats-isrc")) {
+      let isrc = getOverride(overridesStore, id)?.isrc ?? null;
+      let via: IsrcResult["via"] = "spotify";
+      if (!isrc) {
+        const resolved = await getIsrc(id, hint); // may fall through to MusicBrainz
+        if (resolved) ({ isrc, via } = resolved);
+      }
+      if (isrc) setIsrc(overridesStore, id, isrc);
+      const a = isrc ? await featuresFetch(isrc) : null;
+      if (a?.tempoBpm) found = { bpm: a.tempoBpm, source: isrcSource(via) };
+    }
+    if (!found && wants("getsongbpm")) {
+      const prov = await runProviders(hint);
+      if (prov) found = prov;
+    }
+    if (!found && wants("preview")) {
+      const bpm = await fetchTempoViaPreview(id, previewDeps);
+      if (bpm) found = { bpm, source: "preview" };
+    }
+
+    if (found) {
+      cacheDetected(id, found.bpm, found.source, uri);
+      inFlight.delete(uri); // bust the dedup cache so a re-resolve sees the new value
+    }
+    return found;
+  };
+
   // Beat-synced brightness/scale pulse. Self-clocked off Spicetify.Player, so it
   // stays smooth between the coarse progress events; the controller feeds it the
   // felt tempo + danceability per track.
-  const pulse = createVideoPulse(getPulseConfig, {
+  const pulse = createVideoPulse({
     getProgress: () => Spicetify.Player.getProgress(),
-    isPlaying: () => Spicetify.Player.isPlaying(),
   });
+  // Config is applied per-song (and via the Apply button) rather than polled every
+  // frame. `applyPulseSettings` re-reads the settings + re-fetches lyric onsets.
+  const applyPulseSettings = (): void => {
+    pulse.setConfig(getPulseConfig());
+    pulse.setPosition(positionTransform()); // live-apply the X/Y offset, no remount
+    reanchorOverlay?.(); // keep the main aligned to the transport
+    // Live-apply the mirror's offset + flip and re-place it symmetric to the transport.
+    const mirror = document.getElementById(MIRROR_ID) as HTMLVideoElement | null;
+    if (mirror) {
+      mirror.style.transform = mirrorBaseTransform();
+      reanchorMirror?.(); // bottom player: re-place symmetric to the transport
+      pulse.setMirror(mirror); // recapture its rest transform (offset + flip)
+    }
+    const uri = Spicetify.Player.data?.item?.uri;
+    if (uri) void readSpicyOnsets(uri).then((onsets) => pulse.setOnsets(onsets));
+  };
 
   // Best-effort lyric-synced onsets, read from the Spicy Lyrics extension's
-  // exposed cache when the user opts in. Returns null (→ beat fallback) whenever
-  // it's off, Spicy Lyrics is absent, or the track has no cached synced lyrics.
-  const readSpicyOnsets = createSpicyOnsetReader(
-    lyricSyncEnabled,
-    () => (window as any).SpicyLyrics
-  );
+  // per-origin lyrics CacheStorage when the user opts in. Returns null (→ beat
+  // fallback) when it's off, Spicy Lyrics is absent, or the track isn't cached.
+  const readSpicyOnsets = createSpicyOnsetReader(lyricSyncEnabled);
 
   const controller = new CatJamController({
     getConfig,
@@ -837,7 +1313,10 @@ async function main() {
   // reload button can overlap while waiting for the player UI; without
   // this, two videos get inserted.
   const ensureMounted = singleFlight(async () => {
-    controller.setVideo(await mountVideo());
+    const video = await mountVideo();
+    controller.setVideo(video);
+    pulse.attach(video);
+    pulse.setMirror(video ? mountMirror(video) : null);
   });
 
   // Only the general video settings live in the native list; the per-song
@@ -869,24 +1348,36 @@ async function main() {
     "Size of webM video on the left library (Only works for left library, Default: 100)",
     ""
   );
-  // Beat-synced pulse (independently toggleable). Dancier songs pulse harder.
-  settings.addToggle(
-    PULSE_BRIGHTNESS_FIELD,
-    "Pulse: brighten on the beat (dancier songs pulse harder)",
-    true
-  );
-  settings.addToggle(
-    PULSE_SCALE_FIELD,
-    "Pulse: bounce — grow very slightly on the beat",
-    true
-  );
+  // Fine-position offset (px). Negative X = left, negative Y = up. Applied live by
+  // the "Apply pulse settings" button below, and on mount/reload.
+  const OFFSET_PROPS = { step: "1" } as const;
+  settings.addInput(POSITION_X_FIELD, "Position offset X (px, − left / + right)", "0", undefined, "number", OFFSET_PROPS);
+  settings.addInput(POSITION_Y_FIELD, "Position offset Y (px, − up / + down)", "0", undefined, "number", OFFSET_PROPS);
+  // Optional mirror cat — a flipped duplicate mirrored across the play button from
+  // the main (fully dynamic, no gap to set). Toggling it remounts the overlay.
+  settings.addToggle(MIRROR_ENABLED_FIELD, "Mirror cat — a second, flipped cat mirrored across the play button", false, () => {
+    void ensureMounted();
+  });
+  // Beat-synced pulse — two independent controls, each a toggle + its own
+  // intensity (0-100). Dancier songs pulse harder on top of the intensity.
+  const INTENSITY_PROPS = { min: "0", max: "100", step: "5" } as const;
+  settings.addToggle(PULSE_BRIGHTNESS_FIELD, "Pulse — brighten on the beat", true);
   settings.addInput(
-    PULSE_INTENSITY_FIELD,
-    "Pulse intensity (0-100, scales brightness + bounce)",
+    PULSE_BRIGHTNESS_INTENSITY_FIELD,
+    "   ↳ brightness intensity (0-100)",
     "70",
     undefined,
     "number",
-    { min: "0", max: "100", step: "5" }
+    INTENSITY_PROPS
+  );
+  settings.addToggle(PULSE_SCALE_FIELD, "Pulse — bounce (grow slightly) on the beat", true);
+  settings.addInput(
+    PULSE_SCALE_INTENSITY_FIELD,
+    "   ↳ bounce intensity (0-100)",
+    "70",
+    undefined,
+    "number",
+    INTENSITY_PROPS
   );
   // Manual, off by default. Requires the third-party Spicy Lyrics extension —
   // without it (or without cached synced lyrics for a track) the pulse just
@@ -895,13 +1386,18 @@ async function main() {
     PULSE_LYRIC_FIELD,
     "Pulse on lyrics instead of the beat — ⚠ needs the Spicy Lyrics extension installed; " +
       "falls back to the beat when it's missing or a track has no synced lyrics",
-    false,
-    () => {
-      // Apply immediately for the current track (spcr-settings persists the new
-      // value before this fires): re-read onsets, or clear them when toggled off.
-      const uri = Spicetify.Player.data?.item?.uri;
-      if (uri) void readSpicyOnsets(uri).then((onsets) => pulse.setOnsets(onsets));
-    }
+    false
+  );
+  // Optional GetSongBPM lookup — leave blank to skip. Tried only when ReccoBeats
+  // can't resolve a tempo, before the preview scan. Also in the Re-detect menu.
+  settings.addInput(GETSONGBPM_KEY_FIELD, "GetSongBPM API key (getsongbpm.com/api) — real BPM lookup", "");
+  // Pulse settings are read once per song (not polled every frame, for performance).
+  // This applies the current values to the song playing right now.
+  settings.addButton(
+    "catjam-pulse-apply",
+    "Apply the pulse settings + position offset above to the current song (they otherwise take effect on the next song)",
+    "Apply pulse settings now",
+    applyPulseSettings
   );
   settings.addButton("catjam-reload", "Reload custom values", "Save and reload", () => {
     void ensureMounted();
@@ -915,18 +1411,41 @@ async function main() {
   // Initialise rate + pulse for the track already playing (the songchange event
   // only fires on the next track otherwise).
   const startUri = Spicetify.Player.data?.item?.uri;
+  pulse.setConfig(getPulseConfig()); // read settings once at startup
+  pulse.setPlaying(Spicetify.Player.isPlaying());
   if (startUri) controller.onSongChange(startUri, playerState());
   void refreshNowPlaying(); // populate detected bpm for the track already playing
+  setupSpicyLyricsRelocation(); // swap in the Spicy Lyrics button when it's installed
 
   Spicetify.Player.addEventListener("songchange", () => {
     if (!document.getElementById(VIDEO_ID)?.isConnected) {
       void ensureMounted(); // Spotify rebuilt its DOM; remount lazily
     }
+    pulse.setConfig(getPulseConfig()); // re-read the pulse settings for the new song
+    pulse.setPlaying(Spicetify.Player.isPlaying());
     controller.onSongChange(Spicetify.Player.data?.item?.uri, playerState());
     void refreshNowPlaying(); // move the panel + its controls to the now-playing song
+    reanchorOverlay?.(); // the bar may have reflowed; keep the overlay aligned
+    reanchorMirror?.();
+    setupSpicyLyricsRelocation(); // re-apply the lyrics-button swap after any rebuild
+  });
+
+  // Keep the fixed bottom-player overlay + mirror aligned to the bar as it resizes.
+  // Coalesce the burst of resize events during a drag into one reanchor per frame,
+  // so we don't force a synchronous layout (getBoundingClientRect) on every event.
+  let resizePending = false;
+  window.addEventListener("resize", () => {
+    if (resizePending) return;
+    resizePending = true;
+    requestAnimationFrame(() => {
+      resizePending = false;
+      reanchorOverlay?.();
+      reanchorMirror?.();
+    });
   });
 
   Spicetify.Player.addEventListener("onplaypause", () => {
+    pulse.setPlaying(Spicetify.Player.isPlaying());
     controller.onPlayPause(playerState());
   });
 

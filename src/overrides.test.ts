@@ -7,6 +7,7 @@ import {
   clearStoredBpm,
   setDelayMs,
   setTrackName,
+  setIsrc,
   flipDoubleTime,
   removeOverride,
   matchByName,
@@ -67,6 +68,37 @@ describe("overrides", () => {
       doubleTime: true,
       delayMs: 250,
     });
+  });
+
+  it("backpopulates an isrc without clobbering, and ignores a blank one", () => {
+    const s = memStore();
+    setDetectedBpm(s, "A", 128);
+    setIsrc(s, "A", "USUG11904206");
+    expect(getOverride(s, "A")).toEqual({ isrc: "USUG11904206", detectedBpm: 128 });
+    setIsrc(s, "A", ""); // blank ignored — keeps the existing isrc
+    expect(getOverride(s, "A")).toEqual({ isrc: "USUG11904206", detectedBpm: 128 });
+  });
+
+  it("round-trips the isrc field through storage", () => {
+    const s = memStore();
+    setIsrc(s, "A", "GBAYE0601498");
+    expect(readOverrides(s)).toEqual({ A: { isrc: "GBAYE0601498" } });
+  });
+
+  it("tags detected BPM with its provenance and round-trips it", () => {
+    const s = memStore();
+    setDetectedBpm(s, "A", 128, "reccobeats");
+    expect(getOverride(s, "A")).toEqual({ detectedBpm: 128, bpmSource: "reccobeats" });
+    setDetectedBpm(s, "A", 130, "preview"); // re-detect overwrites both bpm + source
+    expect(getOverride(s, "A")).toEqual({ detectedBpm: 130, bpmSource: "preview" });
+  });
+
+  it("drops an orphan/invalid bpmSource (no detected value, or unknown source)", () => {
+    const s = memStore();
+    s.set("catjam-doubletime-overrides", JSON.stringify({ A: { bpmSource: "reccobeats" } }));
+    expect(getOverride(s, "A")).toEqual({}); // source alone is meaningless → stripped
+    s.set("catjam-doubletime-overrides", JSON.stringify({ B: { detectedBpm: 90, bpmSource: "bogus" } }));
+    expect(getOverride(s, "B")).toEqual({ detectedBpm: 90 }); // invalid source stripped, bpm kept
   });
 
   it("clamps stored delay and ignores invalid bpm", () => {

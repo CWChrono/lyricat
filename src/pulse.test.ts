@@ -4,10 +4,19 @@ import {
   depthFromStats,
   beatPhase,
   pulseEnvelope,
+  beatEnvelope,
   onsetEnvelope,
+  onsetFlashEnvelope,
+  sustainEnvelope,
+  onsetArticulation,
+  smoothstep,
+  strengthCurve,
+  onsetsAreSparse,
   brightnessFor,
   scaleFor,
   createVideoPulse,
+  PulseConfig,
+  PlayerClock,
 } from "./pulse";
 
 describe("clamp01", () => {
@@ -69,44 +78,179 @@ describe("pulseEnvelope", () => {
   });
 });
 
-describe("onsetEnvelope", () => {
-  const onsets = [1000, 1500, 5000];
+describe("smoothstep", () => {
+  it("eases 0→1 with flat ends", () => {
+    expect(smoothstep(0)).toBe(0);
+    expect(smoothstep(1)).toBe(1);
+    expect(smoothstep(0.5)).toBeCloseTo(0.5);
+    expect(smoothstep(-1)).toBe(0); // clamped
+    expect(smoothstep(2)).toBe(1);
+  });
+});
+
+describe("beatEnvelope", () => {
+  it("peaks ON the beat (phase 0), not after it — for both glow and bounce", () => {
+    expect(beatEnvelope(0)).toBeCloseTo(1);
+    expect(beatEnvelope(0, 2)).toBeCloseTo(1);
+  });
+  it("rises approaching the beat and rests mid-beat", () => {
+    expect(beatEnvelope(0.97)).toBeGreaterThan(beatEnvelope(0.5)); // just-before-beat > mid-beat
+    expect(beatEnvelope(0.5)).toBeLessThan(0.4);
+  });
+});
+
+describe("onsetEnvelope (syllable spans, hold for the note)", () => {
+  const onsets = [{ start: 1000, end: 1300 }, { start: 1500, end: 1600 }, { start: 5000 }];
   it("rests before the first onset", () => {
-    expect(onsetEnvelope(0, onsets)).toBeCloseTo(0);
-    expect(onsetEnvelope(999, onsets)).toBeCloseTo(0);
+    expect(onsetEnvelope(0, onsets)).toBe(0);
+    expect(onsetEnvelope(999, onsets)).toBe(0);
   });
-  it("fires right after an onset and decays before the next", () => {
-    expect(onsetEnvelope(1000, onsets)).toBeCloseTo(0); // at the onset (start of attack)
-    expect(onsetEnvelope(1046, onsets)).toBeCloseTo(1, 1); // attack peak (~ATTACK × window)
-    expect(onsetEnvelope(1080, onsets)).toBeGreaterThan(0.7); // still a strong pulse
-    expect(onsetEnvelope(1490, onsets)).toBeLessThan(0.2); // decayed before the next onset
+  it("ramps up then holds at max across the note's length", () => {
+    expect(onsetEnvelope(1000, onsets)).toBeCloseTo(0); // attack start
+    expect(onsetEnvelope(1055, onsets)).toBeCloseTo(1, 1); // attack done → max
+    expect(onsetEnvelope(1200, onsets)).toBeCloseTo(1); // held mid-note
+    expect(onsetEnvelope(1300, onsets)).toBeCloseTo(1); // still max at the note end
   });
-  it("uses a default decay window for the final onset", () => {
-    expect(onsetEnvelope(5060, onsets)).toBeGreaterThan(0.5); // pulses after the last onset
-    expect(onsetEnvelope(9000, onsets)).toBeCloseTo(0); // long gone
+  it("eases back down after the note ends", () => {
+    expect(onsetEnvelope(1400, onsets)).toBeLessThan(1); // decaying in the gap
+    expect(onsetEnvelope(1300 + 190, onsets)).toBeCloseTo(0, 1); // released
+  });
+  it("holds longer for a longer (held) note", () => {
+    const long = [{ start: 0, end: 2000 }, { start: 5000 }];
+    const short = [{ start: 0, end: 100 }, { start: 5000 }];
+    expect(onsetEnvelope(1000, long)).toBeCloseTo(1); // still held deep into the long note
+    expect(onsetEnvelope(1000, short)).toBe(0); // short note long since released
+  });
+  it("lets the next onset cut a hold short", () => {
+    expect(onsetEnvelope(1550, onsets)).toBeCloseTo(1); // second note holding
   });
   it("returns rest for an empty onset list", () => {
     expect(onsetEnvelope(1234, [])).toBe(0);
   });
 });
 
-describe("brightnessFor / scaleFor", () => {
-  it("rest at 1 and rise with envelope × depth × intensity", () => {
-    expect(brightnessFor(0, 1, 1, true)).toBeCloseTo(1);
-    expect(brightnessFor(1, 1, 1, true)).toBeGreaterThan(1);
+describe("onsetFlashEnvelope (per-word brightness flash that lerps back down)", () => {
+  const onsets = [{ start: 1000, end: 1300 }, { start: 1500 }, { start: 2000 }];
+  it("rests before the first onset", () => {
+    expect(onsetFlashEnvelope(0, onsets)).toBe(0);
+  });
+  it("flashes just after a word, then lerps back to base before the next", () => {
+    expect(onsetFlashEnvelope(1000, onsets)).toBeCloseTo(0); // rise start
+    expect(onsetFlashEnvelope(1075, onsets)).toBeCloseTo(1, 1); // peak
+    expect(onsetFlashEnvelope(1250, onsets)).toBeLessThan(0.8); // decaying
+    expect(onsetFlashEnvelope(1490, onsets)).toBeLessThan(0.1); // back at base before next word
+  });
+  it("lerps fully within a few-frame gap (window scales to the gap)", () => {
+    const fast = [{ start: 0 }, { start: 48 }]; // ~3 frames at 60fps
+    expect(onsetFlashEnvelope(6, fast)).toBeGreaterThan(0.3); // risen
+    expect(onsetFlashEnvelope(46, fast)).toBeLessThan(0.15); // dropped to ~base by the next
+  });
+});
+
+describe("sustainEnvelope (stay lit across dense syllables, dim only in gaps)", () => {
+  it("holds 1 across back-to-back syllables (no reset per onset)", () => {
+    const dense = [{ start: 0, end: 150 }, { start: 150, end: 300 }, { start: 300, end: 450 }];
+    expect(sustainEnvelope(75, dense)).toBe(1);
+    expect(sustainEnvelope(150, dense)).toBe(1); // boundary — still lit, not reset to 0
+    expect(sustainEnvelope(300, dense)).toBe(1);
+    expect(sustainEnvelope(450, dense)).toBe(1);
+  });
+  it("dims only in a real gap after a note", () => {
+    const spans = [{ start: 0, end: 100 }, { start: 2000, end: 2100 }];
+    expect(sustainEnvelope(50, spans)).toBe(1); // inside the note
+    expect(sustainEnvelope(100 + 190, spans)).toBeCloseTo(0, 1); // released in the gap
+    expect(sustainEnvelope(1000, spans)).toBe(0); // deep in the gap
+  });
+  it("rests before the first onset / empty", () => {
+    expect(sustainEnvelope(0, [{ start: 100 }])).toBe(0);
+    expect(sustainEnvelope(1234, [])).toBe(0);
+  });
+});
+
+describe("onsetArticulation (brief per-syllable dip pulse)", () => {
+  const onsets = [{ start: 1000 }, { start: 1200 }];
+  it("pulses briefly right after each onset, 0 otherwise", () => {
+    expect(onsetArticulation(1000, onsets)).toBeCloseTo(0); // at the onset (rise start)
+    expect(onsetArticulation(1009, onsets)).toBeGreaterThan(0.8); // ~peak (ATTACK × window)
+    expect(onsetArticulation(1075, onsets)).toBe(0); // window elapsed
+    expect(onsetArticulation(1150, onsets)).toBe(0); // between onsets, past the window
+  });
+  it("0 before the first onset / empty", () => {
+    expect(onsetArticulation(0, onsets)).toBe(0);
+    expect(onsetArticulation(1234, [])).toBe(0);
+  });
+});
+
+describe("brightnessFor (dim-and-release: dark base → natural peak, never over-bright)", () => {
+  it("peaks at exactly 1 (natural, full detail) and dips to a dark base", () => {
+    expect(brightnessFor(1, 1, 1, true)).toBeCloseTo(1); // peak = untouched webm, no blow-out
+    expect(brightnessFor(0, 1, 1, true)).toBeCloseTo(0); // dip clamps to full dark at max strength
+    expect(brightnessFor(0.5, 1, 1, true)).toBeGreaterThan(0.3);
+    expect(brightnessFor(0.5, 1, 1, true)).toBeLessThan(1);
+  });
+  it("never exceeds 1 (no synthetic over-brightening)", () => {
+    for (const e of [0, 0.3, 0.7, 1]) expect(brightnessFor(e, 1, 1, true)).toBeLessThanOrEqual(1);
+  });
+  it("high-energy songs dip darker between pulses than chill ones", () => {
+    expect(brightnessFor(0, 0.9, 1, true)).toBeLessThan(brightnessFor(0, 0.2, 1, true));
+  });
+  it("intensity controls the dip depth, not the peak", () => {
+    expect(brightnessFor(1, 1, 1, true)).toBeCloseTo(1); // peak natural at any intensity
+    expect(brightnessFor(1, 1, 0.1, true)).toBeCloseTo(1);
+    expect(brightnessFor(0, 1, 1, true)).toBeLessThan(brightnessFor(0, 1, 0.1, true)); // higher → darker dip
+  });
+  it("intensity 0 or disabled → constant 1 (no dip)", () => {
+    expect(brightnessFor(0, 1, 0, true)).toBeCloseTo(1);
+    expect(brightnessFor(1, 1, 1, false)).toBe(1);
+  });
+  it("beat-mode dimScale dips less than lyric mode", () => {
+    expect(brightnessFor(0, 1, 1, true, 0.5)).toBeGreaterThan(brightnessFor(0, 1, 1, true, 1));
+  });
+});
+
+describe("scaleFor (bounce)", () => {
+  it("rests at 1 and rises with envelope × strength × intensity", () => {
     expect(scaleFor(0, 1, 1, true)).toBeCloseTo(1);
     expect(scaleFor(1, 1, 1, true)).toBeGreaterThan(1);
   });
-  it("dancier songs bounce/brighten more than chill ones", () => {
-    expect(brightnessFor(1, 0.9, 1, true)).toBeGreaterThan(brightnessFor(1, 0.2, 1, true));
+  it("dancier songs bounce more than chill ones", () => {
     expect(scaleFor(1, 0.9, 1, true)).toBeGreaterThan(scaleFor(1, 0.2, 1, true));
   });
-  it("keep the scale bounce very slight (<= +6%)", () => {
-    expect(scaleFor(1, 1, 1, true)).toBeLessThanOrEqual(1.06);
-  });
-  it("return exactly 1 (no effect) when disabled", () => {
-    expect(brightnessFor(1, 1, 1, false)).toBe(1);
+  it("peaks at +18% and is exactly 1 when disabled", () => {
+    expect(scaleFor(1, 1, 1, true)).toBeCloseTo(1.18);
     expect(scaleFor(1, 1, 1, false)).toBe(1);
+  });
+});
+
+describe("strengthCurve (exponential response to song strength)", () => {
+  it("keeps the full/none endpoints", () => {
+    expect(strengthCurve(1)).toBeCloseTo(1);
+    expect(strengthCurve(0)).toBeCloseTo(0);
+  });
+  it("pushes low strength much lower than high strength (mellow ≪ intense)", () => {
+    // depth 0.3 → 0.09 (barely there); depth 0.9 → 0.81 (pops). The ratio widens
+    // vs a linear 0.3 : 0.9.
+    expect(strengthCurve(0.3)).toBeCloseTo(0.09);
+    expect(strengthCurve(0.9)).toBeCloseTo(0.81);
+    expect(strengthCurve(0.9) / strengthCurve(0.3)).toBeGreaterThan(0.9 / 0.3);
+  });
+  it("makes a chill track barely bounce while a banger bounces hard", () => {
+    const chill = scaleFor(1, 0.3, 1, true) - 1; // added scale
+    const banger = scaleFor(1, 0.9, 1, true) - 1;
+    expect(banger).toBeGreaterThan(chill * 8); // exponential gap, not linear (~3×)
+  });
+});
+
+describe("onsetsAreSparse (line-level vs word-level detection)", () => {
+  it("is false for dense word-level onsets", () => {
+    expect(onsetsAreSparse([0, 300, 600, 900, 1200].map((start) => ({ start })))).toBe(false);
+  });
+  it("is true for sparse line-level onsets (long gaps)", () => {
+    expect(onsetsAreSparse([0, 3000, 6500, 9000].map((start) => ({ start })))).toBe(true);
+  });
+  it("is false with fewer than two onsets", () => {
+    expect(onsetsAreSparse([{ start: 100 }])).toBe(false);
+    expect(onsetsAreSparse([])).toBe(false);
   });
 });
 
@@ -130,32 +274,40 @@ describe("createVideoPulse (animator)", () => {
   });
 
   const fakeVideo = (transform = "") =>
-    ({ style: { transform, transformOrigin: "", filter: "" } }) as unknown as HTMLVideoElement;
+    ({ style: { transform, transformOrigin: "", filter: "", willChange: "" } }) as unknown as HTMLVideoElement;
   const tick = () => frameCb?.(0);
-  // 75 ms at 120 bpm → phase 0.15: both the glow and the (sharper) bounce are
-  // active there. Mid-beat (phase 0.5) is now rest for the sharpened scale.
-  const playingAt = (ms: number) => ({ getProgress: () => ms, isPlaying: () => true });
+  // 75 ms at 120 bpm → phase 0.15: both the glow and the (sharper) bounce are active.
+  const playingAt = (ms: number): PlayerClock => ({ getProgress: () => ms });
   const num = (re: RegExp, s: string) => parseFloat(re.exec(s)![1]);
+  const makePulse = (config: PulseConfig, player: PlayerClock, playing = true) => {
+    const p = createVideoPulse(player);
+    p.setConfig(config);
+    p.setPlaying(playing);
+    return p;
+  };
 
-  it("brightens and bounces on the beat while playing", () => {
-    const p = createVideoPulse(() => ({ brightness: true, scale: true, intensity: 1 }), playingAt(75));
+  it("brightens (filter) and bounces (transform) on the beat while playing", () => {
+    const p = makePulse({ brightness: true, scale: true, brightnessIntensity: 1, scaleIntensity: 1 }, playingAt(75));
     const v = fakeVideo();
     p.attach(v);
     p.setTrack(120, 1);
     tick();
-    expect(num(/brightness\(([\d.]+)\)/, v.style.filter)).toBeGreaterThan(1);
+    // Dim-and-release: mid-pulse brightness is between the dark base and 1 (natural).
+    const b = num(/brightness\(([\d.]+)\)/, v.style.filter);
+    expect(b).toBeGreaterThan(0.4);
+    expect(b).toBeLessThan(1);
     // Non-uniform: mostly vertical (sy), slight rightward lean (sx < sy).
     const sx = num(/scale\(([\d.]+),/, v.style.transform);
     const sy = num(/scale\([\d.]+,\s*([\d.]+)\)/, v.style.transform);
     expect(sy).toBeGreaterThan(1);
-    expect(sy).toBeLessThanOrEqual(1.06); // "very slight"
-    expect(sx).toBeGreaterThan(1); // grows rightward a little…
-    expect(sx).toBeLessThan(sy); // …but far less than it grows upward
+    expect(sy).toBeLessThanOrEqual(1.18); // max bounce +18%
+    expect(sx).toBeGreaterThan(1);
+    expect(sx).toBeLessThan(sy);
     expect(v.style.transformOrigin).toBe("left bottom"); // bottom-left pivot
   });
 
   it("composes the scale with the base transform (Bongo translateY preserved)", () => {
-    const p = createVideoPulse(() => ({ brightness: false, scale: true, intensity: 1 }), playingAt(75));
+    const p = makePulse({ brightness: false, scale: true, brightnessIntensity: 1, scaleIntensity: 1 }, playingAt(75));
     const v = fakeVideo("translateY(17px)");
     p.attach(v);
     p.setTrack(120, 1);
@@ -164,8 +316,28 @@ describe("createVideoPulse (animator)", () => {
     expect(v.style.filter).toBe(""); // brightness toggle independent + off
   });
 
+  it("setPosition applies the offset immediately while resting (idle)", () => {
+    const p = makePulse({ brightness: false, scale: false, brightnessIntensity: 1, scaleIntensity: 1 }, playingAt(250));
+    const v = fakeVideo("");
+    p.attach(v);
+    p.setTrack(120, 1);
+    tick(); // both toggles off → reset() → idle
+    p.setPosition("translate(-55px, 0px)");
+    expect(v.style.transform).toBe("translate(-55px, 0px)"); // live, no remount
+  });
+
+  it("setPosition offset survives the bounce (composed with the scale)", () => {
+    const p = makePulse({ brightness: false, scale: true, brightnessIntensity: 1, scaleIntensity: 1 }, playingAt(75));
+    const v = fakeVideo("");
+    p.attach(v);
+    p.setTrack(120, 1);
+    p.setPosition("translate(-55px, 0px)");
+    tick();
+    expect(v.style.transform.startsWith("translate(-55px, 0px) scale(")).toBe(true);
+  });
+
   it("rests (no effect) when both toggles are off", () => {
-    const p = createVideoPulse(() => ({ brightness: false, scale: false, intensity: 1 }), playingAt(250));
+    const p = makePulse({ brightness: false, scale: false, brightnessIntensity: 1, scaleIntensity: 1 }, playingAt(250));
     const v = fakeVideo("translateY(17px)");
     p.attach(v);
     p.setTrack(120, 1);
@@ -174,10 +346,11 @@ describe("createVideoPulse (animator)", () => {
     expect(v.style.transform).toBe("translateY(17px)");
   });
 
-  it("rests while paused", () => {
-    const p = createVideoPulse(
-      () => ({ brightness: true, scale: true, intensity: 1 }),
-      { getProgress: () => 250, isPlaying: () => false }
+  it("rests while paused (play state pushed, not polled)", () => {
+    const p = makePulse(
+      { brightness: true, scale: true, brightnessIntensity: 1, scaleIntensity: 1 },
+      playingAt(250),
+      false // paused
     );
     const v = fakeVideo();
     p.attach(v);
@@ -187,13 +360,37 @@ describe("createVideoPulse (animator)", () => {
     expect(v.style.transform).toBe("");
   });
 
-  it("explicit onsets override the beat clock", () => {
-    const p = createVideoPulse(() => ({ brightness: true, scale: false, intensity: 1 }), playingAt(1046));
+  it("drives a mirror in sync: same brightness, flipped bounce, locked playback", () => {
+    const p = makePulse({ brightness: true, scale: true, brightnessIntensity: 1, scaleIntensity: 1 }, playingAt(75));
+    const main = fakeVideo("");
+    // Give the main playback fields for the mirror's rate/pause/drift sync.
+    Object.assign(main as unknown as Record<string, unknown>, { currentTime: 0.12, playbackRate: 0.2, paused: false });
+    const mirror = {
+      style: { transform: "scaleX(-1)", transformOrigin: "", filter: "", willChange: "" },
+      currentTime: 5, playbackRate: 1, paused: true, play: () => undefined, pause: () => undefined,
+    } as unknown as HTMLVideoElement;
+    p.attach(main);
+    p.setMirror(mirror);
+    p.setTrack(120, 1);
+    tick();
+    expect(mirror.style.filter).toBe(main.style.filter); // same brightness
+    expect(mirror.style.transform.startsWith("scaleX(-1) scale(")).toBe(true); // flip + bounce
+    expect(mirror.style.transformOrigin).toBe("center bottom"); // flip in place (no width shift)
+    expect(mirror.playbackRate).toBe(0.2); // rate matched
+    expect(mirror.currentTime).toBeCloseTo(0.12); // drift-corrected onto the main's frame
+  });
+
+  it("explicit onset spans override the beat clock (brightness flashes on the word)", () => {
+    const p = makePulse(
+      { brightness: true, scale: false, brightnessIntensity: 1, scaleIntensity: 1 },
+      playingAt(1100) // shortly after the first word → flash near peak
+    );
     const v = fakeVideo();
     p.attach(v);
     p.setTrack(120, 1);
-    p.setOnsets([1000, 1500]); // syllable-style onsets; 1046 ≈ attack peak
+    p.setOnsets([{ start: 1000, end: 1300 }, { start: 1500 }]);
     tick();
-    expect(num(/brightness\(([\d.]+)\)/, v.style.filter)).toBeGreaterThan(1.5);
+    // On the word, the flash releases to ~1 (natural, full detail).
+    expect(num(/brightness\(([\d.]+)\)/, v.style.filter)).toBeGreaterThan(0.9);
   });
 });

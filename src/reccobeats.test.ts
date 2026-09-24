@@ -3,7 +3,9 @@ import {
   spotifyIdFromUri,
   parseTempo,
   parseFeature,
+  parseIsrc,
   createAnalysisFetcher,
+  fetchAnalysisByIsrc,
   parsePreviewUrl,
   parseAnalysisTempo,
   fetchTempoViaPreview,
@@ -62,6 +64,20 @@ describe("parseFeature", () => {
     expect(parseFeature(features(120), "danceability")).toBeUndefined();
     expect(parseFeature({ content: [{ danceability: 1.5 }] }, "danceability")).toBeUndefined();
     expect(parseFeature({ content: [{ danceability: "hi" }] }, "danceability")).toBeUndefined();
+  });
+});
+
+describe("parseIsrc", () => {
+  it("pulls the isrc out of a features/track response", () => {
+    expect(parseIsrc({ content: [{ tempo: 120, isrc: "USUG11904206" }] })).toBe("USUG11904206");
+  });
+  it("returns null for missing, empty, blank, or non-string isrc", () => {
+    expect(parseIsrc({})).toBeNull();
+    expect(parseIsrc({ content: [] })).toBeNull();
+    expect(parseIsrc({ content: [{ tempo: 120 }] })).toBeNull();
+    expect(parseIsrc({ content: [{ isrc: "" }] })).toBeNull();
+    expect(parseIsrc({ content: [{ isrc: 42 }] })).toBeNull();
+    expect(parseIsrc(null)).toBeNull();
   });
 });
 
@@ -144,6 +160,44 @@ describe("createAnalysisFetcher", () => {
 
     expect(await fetchAnalysis("spotify:episode:pod")).toBeNull();
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("attaches the isrc when the response carries one", async () => {
+    const body = { content: [{ tempo: 171, isrc: "USUG11904206" }] };
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(okJson(body));
+    const fetchAnalysis = createAnalysisFetcher(fetchFn, noSleep);
+
+    expect(await fetchAnalysis("spotify:track:iso")).toEqual({
+      tempoBpm: 171,
+      isrc: "USUG11904206",
+    });
+  });
+});
+
+describe("fetchAnalysisByIsrc", () => {
+  it("queries audio-features with the isrc as the ids value", async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(okJson(features(128)));
+
+    const result = await fetchAnalysisByIsrc(fetchFn, noSleep, "USUG11904206");
+    expect(result).toEqual({ tempoBpm: 128 });
+    expect(fetchFn.mock.calls[0][0]).toContain("ids=USUG11904206");
+  });
+
+  it("returns null on a miss (200 with no tempo) and does not throw", async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(okJson({ content: [] }));
+    expect(await fetchAnalysisByIsrc(fetchFn, noSleep, "USUG11904206")).toBeNull();
+  });
+
+  it("returns null (without a request) for an empty isrc", async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(okJson(features(128)));
+    expect(await fetchAnalysisByIsrc(fetchFn, noSleep, "")).toBeNull();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("retries 5xx then gives up, returning null uncached", async () => {
+    const fetchFn = vi.fn<FetchLike>().mockResolvedValue(status(503));
+    expect(await fetchAnalysisByIsrc(fetchFn, noSleep, "USUG11904206", 3)).toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 });
 

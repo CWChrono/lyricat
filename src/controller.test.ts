@@ -203,7 +203,7 @@ describe("CatJamController", () => {
   });
 
   it("feeds the pulse the felt tempo and danceability-scaled depth", async () => {
-    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), stop: vi.fn() };
+    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), setConfig: vi.fn(), setPosition: vi.fn(), setMirror: vi.fn(), setPlaying: vi.fn(), stop: vi.fn() };
     const c = new CatJamController({
       getConfig: () => CONFIG,
       fetchAnalysis: () => Promise.resolve({ tempoBpm: 120, danceability: 0.9, energy: 0.7 }),
@@ -221,7 +221,7 @@ describe("CatJamController", () => {
   });
 
   it("rests the pulse (depth 0) for non-track uris", async () => {
-    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), stop: vi.fn() };
+    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), setConfig: vi.fn(), setPosition: vi.fn(), setMirror: vi.fn(), setPlaying: vi.fn(), stop: vi.fn() };
     const c = new CatJamController({
       getConfig: () => CONFIG,
       fetchAnalysis: () => Promise.resolve({ tempoBpm: 120, danceability: 0.9 }),
@@ -230,7 +230,44 @@ describe("CatJamController", () => {
     c.setVideo(fakeVideo());
 
     c.onSongChange(undefined, PLAYING); // podcast / local file / nothing playing
-    expect(pulse.setTrack).toHaveBeenLastCalledWith(undefined, 0);
+    expect(pulse.setTrack).toHaveBeenLastCalledWith(undefined, 0, 0);
+  });
+
+  it("passes the manual sync delay through to the pulse", async () => {
+    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), setConfig: vi.fn(), setPosition: vi.fn(), setMirror: vi.fn(), setPlaying: vi.fn(), stop: vi.fn() };
+    const c = new CatJamController({
+      getConfig: () => CONFIG,
+      fetchAnalysis: () => Promise.resolve({ tempoBpm: 120 }),
+      getDelayMs: () => 90,
+      pulse,
+    });
+    c.setVideo(fakeVideo());
+    c.onSongChange("spotify:track:A", PLAYING);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulse.setTrack.mock.lastCall![2]).toBe(90); // delay ms is the 3rd arg
+  });
+
+  it("applies fetched onsets to the pulse, guarding against a stale track", async () => {
+    const pulse = { attach: vi.fn(), setTrack: vi.fn(), setOnsets: vi.fn(), setConfig: vi.fn(), setPosition: vi.fn(), setMirror: vi.fn(), setPlaying: vi.fn(), stop: vi.fn() };
+    const pendingA = deferred<{ start: number }[] | null>();
+    const c = new CatJamController({
+      getConfig: () => CONFIG,
+      fetchAnalysis: () => Promise.resolve({ tempoBpm: 120 }),
+      pulse,
+      fetchOnsets: (uri) =>
+        uri === "spotify:track:A" ? pendingA.promise : Promise.resolve([{ start: 10 }, { start: 20 }]),
+    });
+    c.setVideo(fakeVideo());
+
+    c.onSongChange("spotify:track:A", PLAYING);
+    c.onSongChange("spotify:track:B", PLAYING); // switch before A's onsets resolve
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulse.setOnsets).toHaveBeenLastCalledWith([{ start: 10 }, { start: 20 }]); // B's
+
+    pulse.setOnsets.mockClear();
+    pendingA.resolve([{ start: 999 }, { start: 1000 }]); // late result for the OLD track
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pulse.setOnsets).not.toHaveBeenCalled(); // stale A dropped
   });
 
   it("no-ops safely without a mounted video", async () => {
