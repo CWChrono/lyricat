@@ -255,7 +255,8 @@ function mirrorBaseTransform(): string {
 }
 
 function currentSource(): string {
-  return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || "");
+  // Bongo Cat is the default when nothing is stored yet.
+  return String(settings.getFieldValue(VIDEO_SOURCE_FIELD) || VIDEO_SOURCES.BONGO);
 }
 
 function getConfig(): CatJamConfig {
@@ -808,6 +809,34 @@ function perSongControls(host: HTMLElement, card: HTMLElement): HTMLElement {
   return wrap;
 }
 
+/**
+ * GetSongBPM requires a backlink to getsongbpm.com wherever its API is used. Shown
+ * in the panel whenever a GetSongBPM key is configured (i.e. when we call their API).
+ */
+function buildGetSongBpmCredit(): HTMLElement | null {
+  if (!providerKey(GETSONGBPM_KEY_FIELD)) return null;
+  const wrap = document.createElement("div");
+  wrap.setAttribute(
+    "style",
+    "margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--spice-button-disabled, #333); " +
+      "font-size: 12px; color: var(--spice-subtext, #a7a7a7);"
+  );
+  const link = document.createElement("a");
+  link.href = "https://getsongbpm.com/";
+  link.textContent = "BPM data powered by GetSongBPM";
+  link.setAttribute("style", "color: var(--spice-text, #1ed760); text-decoration: underline; cursor: pointer;");
+  link.onclick = (e) => {
+    e.preventDefault();
+    try {
+      window.open("https://getsongbpm.com/", "_blank"); // open in the default browser
+    } catch {
+      /* the visible credit still satisfies the attribution */
+    }
+  };
+  wrap.appendChild(link);
+  return wrap;
+}
+
 /** Render the injected Cat-Jam Library panel (current song card or full list). */
 function renderWhitelistInto(host: HTMLElement): void {
   host.textContent = "";
@@ -847,6 +876,9 @@ function renderWhitelistInto(host: HTMLElement): void {
     const card = trackCard(nowPlayingCardText());
     host.append(card, perSongControls(host, card));
   }
+
+  const credit = buildGetSongBpmCredit(); // mandatory GetSongBPM attribution, when used
+  if (credit) host.append(credit);
 }
 
 /** Resolve the current track's bpm and refresh the preview to show it. */
@@ -1325,8 +1357,8 @@ async function main() {
   settings.addDropDown(
     VIDEO_SOURCE_FIELD,
     "Which video to show",
-    [VIDEO_SOURCES.DEFAULT, VIDEO_SOURCES.BONGO, VIDEO_SOURCES.CUSTOM],
-    0,
+    [VIDEO_SOURCES.BONGO, VIDEO_SOURCES.DEFAULT, VIDEO_SOURCES.CUSTOM],
+    0, // Bongo Cat is the default
     () => {
       void ensureMounted(); // remount with the newly selected video
     }
