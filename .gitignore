@@ -149,3 +149,5 @@ dist/
 # macOS
 .DS_Store
 **/.DS_Store
+# Google Drive sync — one-time refresh token output (sensitive, never commit)
+drive-refresh-token.txt

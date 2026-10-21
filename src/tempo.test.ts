@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computePlaybackRate, normalizeTempo, DEFAULT_VIDEO_BPM } from "./tempo";
+import { computePlaybackRate, normalizeTempo, effectiveTempo, DEFAULT_VIDEO_BPM } from "./tempo";
 
 describe("normalizeTempo", () => {
   it("leaves felt-range tempos untouched", () => {
@@ -63,12 +63,27 @@ describe("computePlaybackRate", () => {
     expect(computePlaybackRate(null, 135.48)).toBeCloseTo(1); // cat unchanged
   });
 
-  it("honours a manual double-time override over the auto fold", () => {
-    // true forces a halve even below the ceiling (140 -> 70)
-    expect(computePlaybackRate(140, DEFAULT_VIDEO_BPM, true)).toBeCloseTo(70 / 135.48);
-    // false keeps an above-ceiling tempo unfolded (170 stays 170)
-    expect(computePlaybackRate(170, DEFAULT_VIDEO_BPM, false)).toBeCloseTo(170 / 135.48);
+  it("honours a manual meter divisor over the auto fold", () => {
+    // 2 halves even below the ceiling (140 -> 70)
+    expect(computePlaybackRate(140, DEFAULT_VIDEO_BPM, 2)).toBeCloseTo(70 / 135.48);
+    // 1 keeps an above-ceiling tempo unfolded (170 stays 170)
+    expect(computePlaybackRate(170, DEFAULT_VIDEO_BPM, 1)).toBeCloseTo(170 / 135.48);
     // undefined defers to the auto fold (170 -> 85)
     expect(computePlaybackRate(170, DEFAULT_VIDEO_BPM)).toBeCloseTo(85 / 135.48);
+  });
+
+  it("cuts the tempo into 3- and 4-beat meters", () => {
+    expect(computePlaybackRate(120, DEFAULT_VIDEO_BPM, 3, 0, 5)).toBeCloseTo(40 / 135.48);
+    expect(computePlaybackRate(120, DEFAULT_VIDEO_BPM, 4, 0, 5)).toBeCloseTo(30 / 135.48);
+  });
+});
+
+describe("effectiveTempo (meter divisor)", () => {
+  it("divides by the meter, or auto-folds when unset", () => {
+    expect(effectiveTempo(140, 2)).toBe(70);
+    expect(effectiveTempo(120, 3)).toBe(40);
+    expect(effectiveTempo(140, 1)).toBe(140); // raw
+    expect(effectiveTempo(170)).toBe(85); // auto fold
+    expect(effectiveTempo(140, 0)).toBe(140); // invalid (<1) → auto fold path (140 < 150 stays)
   });
 });

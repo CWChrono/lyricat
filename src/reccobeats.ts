@@ -38,15 +38,25 @@ export function parseIsrc(body: unknown): string | null {
   return typeof v === "string" && v ? v : null;
 }
 
+/** Read the time-signature numerator (Spotify's `timeSignature`/`time_signature`), else undefined. */
+export function parseTimeSignature(body: unknown): number | undefined {
+  const c = (body as { content?: Array<Record<string, unknown>> })?.content?.[0];
+  const v = c?.timeSignature ?? c?.time_signature;
+  const n = typeof v === "number" ? Math.round(v) : NaN;
+  return Number.isFinite(n) && n >= 2 && n <= 12 ? n : undefined;
+}
+
 /** Assemble an AnalysisResult from a features response, attaching stats when present. */
 function toAnalysis(body: unknown, tempoBpm: number): AnalysisResult {
   const result: AnalysisResult = { tempoBpm };
   const danceability = parseFeature(body, "danceability");
   const energy = parseFeature(body, "energy");
   const isrc = parseIsrc(body);
+  const timeSignature = parseTimeSignature(body);
   if (danceability !== undefined) result.danceability = danceability;
   if (energy !== undefined) result.energy = energy;
   if (isrc) result.isrc = isrc;
+  if (timeSignature !== undefined) result.timeSignature = timeSignature;
   return result;
 }
 

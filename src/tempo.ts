@@ -24,20 +24,20 @@ export function normalizeTempo(bpm: number): number {
 }
 
 /**
- * The tempo the cat actually dances to. A manual `doubleTime` override wins:
- * true forces a half (the song is double-time), false trusts the raw value.
- * Without an override the automatic octave fold decides.
+ * The tempo the cat actually dances to. A manual `divisor` override wins — it cuts
+ * the tempo into that meter: 1 trusts the raw value, 2 is half-time (the old
+ * double-time), 3/4 fit 3- or 4-beat meters. Without an override the automatic
+ * octave fold decides.
  */
-export function effectiveTempo(bpm: number, doubleTime?: boolean): number {
-  if (doubleTime === true) return bpm / 2;
-  if (doubleTime === false) return bpm;
+export function effectiveTempo(bpm: number, divisor?: number): number {
+  if (typeof divisor === "number" && Number.isFinite(divisor) && divisor >= 1) return bpm / divisor;
   return normalizeTempo(bpm);
 }
 
 export function computePlaybackRate(
   trackTempoBpm: number | null | undefined,
   videoDefaultBpm: number,
-  doubleTime?: boolean,
+  divisor?: number,
   minRate: number = MIN_RATE,
   maxRate: number = MAX_RATE
 ): number {
@@ -46,5 +46,5 @@ export function computePlaybackRate(
   // No tempo: fall back to the video's native rate, clamped into the source's
   // range (1 for the cat; the ceiling keeps fast-looping videos like bongo sane).
   if (!validBpm(trackTempoBpm)) return clamp(1);
-  return clamp(effectiveTempo(trackTempoBpm, doubleTime) / video);
+  return clamp(effectiveTempo(trackTempoBpm, divisor) / video);
 }

@@ -4,6 +4,7 @@ import {
   parseTempo,
   parseFeature,
   parseIsrc,
+  parseTimeSignature,
   createAnalysisFetcher,
   fetchAnalysisByIsrc,
   parsePreviewUrl,
@@ -64,6 +65,18 @@ describe("parseFeature", () => {
     expect(parseFeature(features(120), "danceability")).toBeUndefined();
     expect(parseFeature({ content: [{ danceability: 1.5 }] }, "danceability")).toBeUndefined();
     expect(parseFeature({ content: [{ danceability: "hi" }] }, "danceability")).toBeUndefined();
+  });
+});
+
+describe("parseTimeSignature", () => {
+  it("reads a valid in-range time signature from content[0]", () => {
+    expect(parseTimeSignature({ content: [{ tempo: 120, timeSignature: 3 }] })).toBe(3);
+    expect(parseTimeSignature({ content: [{ time_signature: 4 }] })).toBe(4);
+  });
+  it("returns undefined when absent or out of range", () => {
+    expect(parseTimeSignature({ content: [{ tempo: 120 }] })).toBeUndefined();
+    expect(parseTimeSignature({ content: [{ timeSignature: 1 }] })).toBeUndefined();
+    expect(parseTimeSignature({})).toBeUndefined();
   });
 });
 
