@@ -2,23 +2,52 @@
 
 ![preview](marketplace/preview.gif)
 
-A Bongo Cat that jams next to your player **in sync with your music's BPM** — brightening and bouncing to the beat (or the lyrics). A Spicetify extension.
+A **Bongo Cat** (or **Pop Cat**) that pops along to your music — on the **beat**, or word-by-word with the **lyrics** — plus a word-timed **lyric editor**, built-in **romanization**, and **Google Drive cloud sync**. A Spicetify extension.
 
-> ⚙ Settings live at the bottom of the regular Spotify settings, with a **Lyricat Library** panel below them for per-song BPM controls.
+> ⚙ Open **Lyricat** from the sidebar link / topbar button. Settings and a **Lyricat Library** panel (per-song controls, the lyric editor, and cloud sync) live there.
 
 ## Features 🎛️
 
-- **Bongo Cat by default** — paws flapping in time with the beat. The classic Cat Jam and a custom webM URL are still selectable.
-- **Beat- & lyric-synced pulse** — the cat brightens and bounces on the beat, scaled by the track's danceability (dancier = punchier, chill = subtle). With the [Spicy Lyrics](https://github.com/spikerko/spicy-lyrics) extension installed it can pulse per **syllable** instead of the beat.
-- **Mirror cat** — an optional second, flipped cat mirrored across the play button; fully dynamic and flexes with the window.
-- **Multi-source BPM detection**, cascading and cached per track with visible provenance (*"BPM from …"*):
-  1. **ReccoBeats** by Spotify id — Spotify's catalog tempo
-  2. **ReccoBeats by ISRC** — resolved via Spotify metadata or **MusicBrainz**
-  3. **GetSongBPM** — optional, bring your own API key
-  4. **30s preview scan** — ReccoBeats analysis, as a last resort
+### 🎵 The cat pops on the lyrics
+- **Word-timed sync** — instead of only bouncing on the beat, the cat pops its mouth **per word / syllable**, in time with the vocals.
+- **Lyric source chain** — onsets resolve down a cascade and are cached per track:
+  1. **[Spicy Lyrics](https://github.com/spikerko/spicy-lyrics)** — word-synced lyrics (best)
+  2. **[LRCLIB](https://lrclib.net)** — free, no-auth line-synced lyrics
+  3. **Heuristic** — syllable estimation spread across each line's play time
+- **Loudness onsets** — taps Spotify's own internal audio-analysis (the desktop client's authenticated channel) to time pops to the actual loudness envelope, and to drive the pulse.
+- **Next-track prefetch** — the upcoming song's analysis + onsets are warmed so skips stay in sync instantly.
 
-  Re-runnable from a per-song **Re-detect** menu.
-- **Per-song controls** — manual BPM override, double-time toggle, sync-delay nudge, and position offsets, all remembered per track.
+### 🐾 Cats & motion
+- **Bongo Cat** (default), the classic **Cat Jam**, a frame-animated **Pop Cat**, or a **custom webM URL** — selectable per source.
+- **Beat- & lyric-synced pulse** — the cat brightens and bounces, scaled by the track's danceability (dancier = punchier, chill = subtle). Brightness and bounce toggle independently with their own intensity.
+- **Mirror cat** — an optional second, flipped cat mirrored across the play button; fully dynamic and flexes with the window.
+- **Duet voices** — words can be routed to two voices (default **Mittens** / **Biscuit**, renameable per track) plus a background lane, so a line's lead and backing vocals can drive **two separate cats**.
+
+### 🎹 Lyric editor
+A built-in editor (open the **Advanced editor** from the Library panel) to make any song pop perfectly:
+- **Word mode** — retime, split/merge, and assign each word's voice + background lane.
+- **Line mode** — text-edit a whole line (type `/` or `-` to split CJK into singable units); timing is preserved where possible.
+- **Plotting mode** — tap words into place against the playing track.
+- **Upload raw lyrics** to start from scratch, **autosaves every 30s**, with undo/redo.
+- **Export** — write word-timed **TTML** (Apple-style), or push edited lyrics straight into **Spicy Lyrics'** own library so they show in its panel (**Spicy Sync**).
+
+### 🔤 Romanization
+- **Built-in, bundled** romanization — **Korean** (Revised Romanization via [es-hangul](https://github.com/toss/es-hangul)) and **Chinese** (toneless pinyin via [pinyin-pro](https://github.com/zh-lx/pinyin-pro)) — synchronous, cached, no network.
+- **Japanese** via a separate, crash-isolated companion extension ([kuroshiro](https://github.com/hexenq/kuroshiro) + [kuromoji](https://github.com/takuyaa/kuromoji.js)) that downloads its dictionary once (~10MB).
+- **Romanize all** fills every word from the detected language; hand-tune afterward.
+
+### 🥁 BPM detection
+Multi-source, cascading, and cached per track with visible provenance (*"BPM from …"*), re-runnable from a per-song **Re-detect** menu:
+1. **[ReccoBeats](https://reccobeats.com)** by Spotify id — Spotify's catalog tempo
+2. **ReccoBeats by ISRC** — resolved via Spotify metadata or **[MusicBrainz](https://musicbrainz.org)**
+3. **[GetSongBPM](https://getsongbpm.com/)** — optional, bring your own API key
+4. **30s preview scan** — ReccoBeats analysis, as a last resort
+
+Plus per-song **manual BPM override**, **double-time** toggle, **sync-delay** nudge, and position offsets — all remembered per track. Free-tier providers are kept under **daily rate-limit budgets** that survive restarts.
+
+### ☁️ Cloud sync
+- **Google Drive sync** of your settings, song library, and one browsable `.lrc` per saved song (hand-editable in Drive).
+- Optional **daily auto-sync** (upload-only) plus manual **Upload ↑ / Download** with conflict detection and a backup on download.
 
 ## Install 📦
 
@@ -33,23 +62,34 @@ Not on the Marketplace — install the built extension manually:
 
 Or build from source: `npm install && npm run build` (via [spicetify-creator](https://github.com/spicetify/spicetify-creator)).
 
+## Optional setup 🔧
+
+- **Word-synced lyrics** — install **[Spicy Lyrics](https://github.com/spikerko/spicy-lyrics)** for the best onset source (Lyricat falls back to LRCLIB / heuristics without it).
+- **Japanese romanization** — enable the companion `catjam-ja-romanizer` extension (built alongside `cat-jam.js`) so Japanese tracks romanize; it's isolated on purpose so its dictionary can't crash the main extension.
+- **Google Drive sync** — create a Desktop-app OAuth client, run `node drive-auth.mjs <client_id> <client_secret>` once to mint a refresh token, then paste the client id/secret/refresh-token + target folder id into the Library panel's sync section.
+
 ## Credits 🐈
 
 - Original extension + cat video: **[BlafKing/spicetify-cat-jam-synced](https://github.com/BlafKing/spicetify-cat-jam-synced)**.
 - Forked from **[caml07/spicetify-cat-jam-synced](https://github.com/caml07/spicetify-cat-jam-synced)** (modernized sync core, ReccoBeats tempo).
-- Optional BPM data by **[GetSongBPM](https://getsongbpm.com/)**.
+- Lyrics: **[Spicy Lyrics](https://github.com/spikerko/spicy-lyrics)** (word-synced source + panel integration) and **[LRCLIB](https://lrclib.net)** (open synced-lyrics database).
+- Tempo & metadata: **[ReccoBeats](https://reccobeats.com)**, **[MusicBrainz](https://musicbrainz.org)**, and BPM data by **[GetSongBPM](https://getsongbpm.com/)**.
+- Romanization: **[es-hangul](https://github.com/toss/es-hangul)** (Korean), **[pinyin-pro](https://github.com/zh-lx/pinyin-pro)** (Chinese), **[kuroshiro](https://github.com/hexenq/kuroshiro)** + **[kuromoji](https://github.com/takuyaa/kuromoji.js)** (Japanese).
+- Built with **[spicetify-creator](https://github.com/spicetify/spicetify-creator)**.
 - MIT licensed.
 
 # Changelog 📋
 
 <h3>Lyricat (this fork)</h3>
 
-- **Bongo Cat is now the default** video source.
-- **Beat-synced pulse**: the cat brightens and bounces on the beat, scaled exponentially by danceability/energy; brightness and bounce toggle independently with their own intensity.
-- **Lyric-synced pulse**: reads the [Spicy Lyrics](https://github.com/spikerko/spicy-lyrics) cache to pulse per syllable, with continuous polling so a cold track picks up sync mid-play; falls back to the beat when unavailable. When Spicy Lyrics is installed, its lyrics button replaces Spotify's.
-- **Mirror cat**: an optional flipped clone mirrored across the play button, driven in lock-step (top-level overlay, so it never covers the player controls).
-- **More BPM sources with provenance**: ISRC fallback via Spotify metadata / **MusicBrainz**, an optional **[GetSongBPM](https://getsongbpm.com/)** lookup (user API key), and a **Re-detect** menu to re-run a specific mechanism. Every detected value is saved tagged with where it came from and reused across plays.
-- Performance + correctness: 30fps dirty-checked animator, resize/seek-aware clock, and a full unit-test suite.
+- **Word-timed lyric sync**: the cat pops per word/syllable, with onsets resolved Spicy Lyrics → LRCLIB → heuristic, timed against Spotify's internal audio-analysis loudness envelope, and cached + prefetched for instant skips.
+- **Lyric editor**: a VSCode-style advanced panel (word / line / plotting modes) with raw-lyrics upload, undo/redo, autosave, duet-voice + background-lane assignment, TTML export, and write-back into Spicy Lyrics' own library.
+- **Romanization**: bundled Korean (es-hangul) + Chinese (pinyin-pro), with Japanese handled by a separate crash-isolated extension (kuroshiro/kuromoji).
+- **Pop Cat** source (frame-animated, pops per syllable) and a mirror cat that can sing the backing vocals.
+- **Beat- & lyric-synced pulse**: brightens and bounces, scaled exponentially by danceability/energy; brightness and bounce toggle independently.
+- **Google Drive cloud sync** of settings, song library, and per-song `.lrc` files.
+- **More BPM sources with provenance**: ISRC fallback via Spotify metadata / MusicBrainz, optional GetSongBPM (user API key), per-provider daily rate limits, and a Re-detect menu.
+- Performance + correctness: dirty-checked animator, resize/seek-aware clock, and a full unit-test suite.
 
 <h3>v1.4.0</h3>
 
