@@ -15,6 +15,8 @@ import {
   brightnessFor,
   scaleFor,
   createVideoPulse,
+  syllableFrameOpen,
+  beatFrameOpen,
   PulseConfig,
   PlayerClock,
 } from "./pulse";
@@ -251,6 +253,46 @@ describe("onsetsAreSparse (line-level vs word-level detection)", () => {
   it("is false with fewer than two onsets", () => {
     expect(onsetsAreSparse([{ start: 100 }])).toBe(false);
     expect(onsetsAreSparse([])).toBe(false);
+  });
+});
+
+describe("syllableFrameOpen (per-pulse frame decision)", () => {
+  // Two back-to-back notes (end touches the next start), then a note followed by a
+  // rest. The mouth holds open for each note, with a quick close-pop at each onset.
+  const onsets = [
+    { start: 1000, end: 1300 }, // dense: runs into the next
+    { start: 1300, end: 2000 }, // dense: runs into the next
+    { start: 2000, end: 2100 }, // then a rest until… (no next onset)
+  ];
+  it("is closed before the first syllable", () => {
+    expect(syllableFrameOpen(500, onsets)).toBe(false);
+  });
+  it("opens through the body of each note", () => {
+    expect(syllableFrameOpen(1100, onsets)).toBe(true); // early in note 1
+    expect(syllableFrameOpen(1400, onsets)).toBe(true); // early in note 2
+    expect(syllableFrameOpen(2010, onsets)).toBe(true); // early in note 3
+  });
+  it("closes the tail of each note so the pop lands on the boundary", () => {
+    expect(syllableFrameOpen(1290, onsets)).toBe(false); // release tail of note 1 (ends 1300)
+    expect(syllableFrameOpen(1950, onsets)).toBe(false); // release tail of note 2 (ends 2000)
+    expect(syllableFrameOpen(2090, onsets)).toBe(false); // release tail of note 3 (ends 2100)
+  });
+  it("stays closed after the last note and through rests", () => {
+    expect(syllableFrameOpen(2200, onsets)).toBe(false); // note 3 ended at 2100
+    expect(syllableFrameOpen(3000, onsets)).toBe(false); // deep into the rest
+  });
+  it("is closed with no onsets", () => {
+    expect(syllableFrameOpen(1100, null)).toBe(false);
+    expect(syllableFrameOpen(1100, [])).toBe(false);
+  });
+});
+
+describe("beatFrameOpen (Bongo beat-driven frame)", () => {
+  it("holds each frame for one whole beat, alternating per beat (60bpm → 1s beats)", () => {
+    expect(beatFrameOpen(0.5, 60)).toBe(false); // beat 0 → frame A
+    expect(beatFrameOpen(1.5, 60)).toBe(true); // beat 1 → frame B
+    expect(beatFrameOpen(2.5, 60)).toBe(false); // beat 2 → frame A
+    expect(beatFrameOpen(3.5, 60)).toBe(true); // beat 3 → frame B
   });
 });
 

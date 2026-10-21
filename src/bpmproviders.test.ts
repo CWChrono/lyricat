@@ -1,5 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
-import { findTempo, parseGetSongBpm, fetchGetSongBpm } from "./bpmproviders";
+import {
+  findTempo,
+  parseGetSongBpm,
+  fetchGetSongBpm,
+  findBpmLike,
+  findTimeSignature,
+  fetchMusicaeFeatures,
+  fetchMusicaeDj,
+} from "./bpmproviders";
 
 const ok = (body: unknown) => ({ ok: true, json: async () => body }) as Response;
 const bad = () => ({ ok: false, json: async () => ({}) }) as Response;
@@ -50,5 +58,73 @@ describe("fetchGetSongBpm (key-gated, fail-soft)", () => {
   it("a thrown fetch fails soft to null", async () => {
     const boom = vi.fn().mockRejectedValue(new Error("net"));
     expect(await fetchGetSongBpm(boom, "K", "t", "a")).toBeNull();
+  });
+});
+
+describe("findBpmLike (Musicae)", () => {
+  it("reads a number tempo from the features shape, keeping the fraction", () => {
+    expect(findBpmLike({ audio_features: [{ tempo: 188.25, id: "x" }] })).toBe(188.25);
+  });
+  it("reads rhythm.bpm from the DJ shape, skipping the string tempo", () => {
+    expect(findBpmLike({ rhythm: { tempo: "123.00 BPM", bpm: 122.746, half_time_bpm: 61.373 } })).toBe(122.746);
+  });
+  it("rejects out-of-range and absent values", () => {
+    expect(findBpmLike({ rhythm: { bpm: 9999 } })).toBeNull();
+    expect(findBpmLike({ error: { status: 404 } })).toBeNull();
+    expect(findBpmLike(null)).toBeNull();
+  });
+});
+
+describe("findTimeSignature (Musicae)", () => {
+  it("reads the Spotify-shaped integer time_signature", () => {
+    expect(findTimeSignature({ audio_features: [{ time_signature: 3 }] })).toBe(3);
+    expect(findTimeSignature({ audio_features: [{ time_signature: 4 }] })).toBe(4);
+  });
+  it("parses the DJ-shaped 'N/M' string and beats_per_bar", () => {
+    expect(findTimeSignature({ rhythm: { time_signature: "3/4", beats_per_bar: 3 } })).toBe(3);
+    expect(findTimeSignature({ rhythm: { beats_per_bar: 4 } })).toBe(4);
+  });
+  it("rejects out-of-range / absent signatures", () => {
+    expect(findTimeSignature({ rhythm: { time_signature: "1/4" } })).toBeUndefined();
+    expect(findTimeSignature({ audio_features: [{ tempo: 120 }] })).toBeUndefined();
+    expect(findTimeSignature(null)).toBeUndefined();
+  });
+});
+
+describe("fetchMusicaeFeatures / fetchMusicaeDj (rate-limited RapidAPI providers)", () => {
+  it("no key → no request, not responded", async () => {
+    const f = vi.fn();
+    expect(await fetchMusicaeFeatures(f, "", "ID")).toEqual({ responded: false, bpm: null });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("features: calls the host with ids + rapidapi headers, returns fractional tempo", async () => {
+    const f = vi.fn().mockResolvedValue(ok({ audio_features: [{ tempo: 188.25 }] }));
+    expect(await fetchMusicaeFeatures(f, "KEY", "7G8Ycb0hYdQ7cgjVvZ9fAL")).toEqual({ responded: true, bpm: 188.25 });
+    const [url, init] = f.mock.calls[0];
+    expect(url).toContain("spotify-extended-audio-features-api.p.rapidapi.com/v1/audio-features?ids=7G8Ycb0hYdQ7cgjVvZ9fAL");
+    expect((init as RequestInit).headers).toMatchObject({
+      "x-rapidapi-key": "KEY",
+      "x-rapidapi-host": "spotify-extended-audio-features-api.p.rapidapi.com",
+    });
+  });
+
+  it("dj: calls the path-segment id endpoint, returns rhythm.bpm + time signature", async () => {
+    const f = vi.fn().mockResolvedValue(ok({ rhythm: { tempo: "123.00 BPM", bpm: 122.746, time_signature: "4/4" } }));
+    expect(await fetchMusicaeDj(f, "KEY", "0DiWol3AO6WpXZgp0goxAV")).toEqual({
+      responded: true,
+      bpm: 122.746,
+      timeSignature: 4,
+    });
+    expect(f.mock.calls[0][0]).toContain("dj-track-audio-analysis-api.p.rapidapi.com/v2/audio-analysis/0DiWol3AO6WpXZgp0goxAV");
+  });
+
+  it("a 404/throttle response is responded (counts against budget) but no bpm", async () => {
+    expect(await fetchMusicaeDj(vi.fn().mockResolvedValue(bad()), "KEY", "ID")).toEqual({ responded: true, bpm: null });
+  });
+
+  it("a network error is not responded (budget preserved)", async () => {
+    const boom = vi.fn().mockRejectedValue(new Error("net"));
+    expect(await fetchMusicaeFeatures(boom, "KEY", "ID")).toEqual({ responded: false, bpm: null });
   });
 });

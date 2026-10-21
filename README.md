@@ -1,10 +1,10 @@
-# 🐱 Spicetify Bongo Cat Jam
+# 🐱 Lyricat
 
 ![preview](marketplace/preview.gif)
 
 A Bongo Cat that jams next to your player **in sync with your music's BPM** — brightening and bouncing to the beat (or the lyrics). A Spicetify extension.
 
-> ⚙ Settings live at the bottom of the regular Spotify settings, with a **Cat-Jam Library** panel below them for per-song BPM controls.
+> ⚙ Settings live at the bottom of the regular Spotify settings, with a **Lyricat Library** panel below them for per-song BPM controls.
 
 ## Features 🎛️
 
@@ -42,7 +42,7 @@ Or build from source: `npm install && npm run build` (via [spicetify-creator](ht
 
 # Changelog 📋
 
-<h3>Bongo Cat Jam (this fork)</h3>
+<h3>Lyricat (this fork)</h3>
 
 - **Bongo Cat is now the default** video source.
 - **Beat-synced pulse**: the cat brightens and bounces on the beat, scaled exponentially by danceability/energy; brightness and bounce toggle independently with their own intensity.

@@ -42,14 +42,37 @@ export interface PlayerClock {
   getProgress(): number;
 }
 
-/** What the controller drives: attach a video, push per-track + play state. */
+/** The cat element the pulse animates: a looping <video>, or an <img> for the
+ *  2-frame image sources (Pop Cat) whose frame is swapped instead of seeked. */
+export type CatMedia = HTMLVideoElement | HTMLImageElement;
+
+/** What the controller drives: attach a video/img, push per-track + play state. */
 export interface VideoPulse {
-  /** Point the pulse at a (freshly mounted) video, or null to detach. */
-  attach(video: HTMLVideoElement | null): void;
+  /** Point the pulse at a (freshly mounted) cat element, or null to detach. */
+  attach(video: CatMedia | null): void;
   /** New track: felt bpm (undefined = unknown), pulse depth [0,1], manual sync delay (ms). */
   setTrack(feltBpm: number | undefined, depth: number, delayMs?: number): void;
   /** Explicit onset spans for the current track, or null for beat-driven. */
   setOnsets(onsets: PulseOnset[] | null): void;
+  /** Separate onset spans the MIRROR cat pops on (background/secondary vocals), so it can "sing" a
+   *  different part than the main cat. Null → the mirror mirrors the main cat's frame (default). */
+  setMirrorOnsets(onsets: PulseOnset[] | null): void;
+  /**
+   * "Animate per pulse": for a 2-frame cat (Pop/Bongo), drive the *frame* off the
+   * syllable onsets (frame 1 at rest, frame 2 while a syllable sounds) instead of
+   * looping the clip on the beat. The bounce/brightness keep following the beat.
+   * The controller pauses the video so the pulse owns its frame; false restores
+   * the normal beat loop.
+   */
+  setSyllableFrames(on: boolean): void;
+  /** Frame images for a 2-frame image source (Pop Cat), or null for a <video> source.
+   *  When set, per-pulse mode swaps these instead of seeking the clip. */
+  setFrames(frames: { closed: string; open: string } | null): void;
+  /** Bongo "follow the audio fluctuations": a sampler returning the normalized [0,1]
+   *  loudness at a playback position (ms), from Spotify's analysis. When set, Bongo's
+   *  brightness + bounce track this value directly instead of the beat/onset envelope.
+   *  Null restores the normal behaviour. */
+  setLoudness(sampler: ((ms: number) => number) | null): void;
   /** Push the settings (toggles + intensities). Read once per song / on "Apply", never per frame. */
   setConfig(config: PulseConfig): void;
   /** Update the video's rest transform (e.g. a position offset). The pulse composes
@@ -94,6 +117,15 @@ const SCALE_SHARPNESS = 2;
 // slight rightward lean (~12° clockwise from vertical), so the bottom cutoff
 // line stays put. Horizontal growth is this fraction of the vertical growth.
 const SCALE_ANGLE_RATIO = 0.2;
+// Pop Cat's beat bounce is a squash & stretch: on the beat it STRETCHES (taller +
+// thinner), then on the way down it SQUASHES (shorter + wider), settling to rest. The
+// vertical change drives an inverse horizontal change (volume-preserving feel). Bigger
+// than the normal bounce ("more bounce"), with a shallower brightness dip ("less pulse").
+const POP_STRETCH = 0.21; // peak vertical stretch on the beat (max, −50% from first pass)
+const POP_SQUASH = 0.11; // peak vertical squash just after
+const POP_SQUASH_DELAY = 0.18; // phase lag (of the half-beat) before the landing squash
+const POP_VOLUME = 0.55; // how strongly width counter-moves vs height
+const POP_DIM_SCALE = 0.25; // brightness dip depth (half the beat path) — less flicker
 // Only re-anchor the smooth clock when the reported position jumps more than
 // this (a real seek) — ignoring Spotify's coarse per-tick samples keeps the
 // pulse from stuttering as it eases back to rest.
@@ -321,6 +353,48 @@ export function scaleFor(
   return 1 + MAX_SCALE_BOOST * strengthCurve(depth) * clamp01(intensity) * clamp01(envelope);
 }
 
+/**
+ * Frame decision for "animate per pulse": true → show the open frame (a syllable
+ * is sounding), false → the resting frame. Uses the sustain envelope so back-to-
+ * back syllables stay open and it only closes in real gaps. No onsets → closed.
+ */
+// The mouth pops open at each note's onset and holds open through the body of the
+// note, then *closes for the tail* — a release that lands the articulation on the
+// note's end (the word boundary). Consecutive notes therefore read as distinct pops
+// (open → hold → close → open …) rather than one long hold. The close window is a
+// fraction of the note, clamped so it's always visible yet never swallows the hold.
+const FRAME_CLOSE_MIN_MS = 70; // shortest (still visible) release
+const FRAME_CLOSE_MAX_MS = 200; // longest — keeps a long note mostly open
+const FRAME_CLOSE_FRACTION = 0.3; // close roughly the last third of a note
+
+export function syllableFrameOpen(progressMs: number, onsets: readonly PulseOnset[] | null): boolean {
+  if (!onsets || onsets.length === 0) return false;
+  const idx = lastOnsetIndex(onsets, progressMs);
+  if (idx < 0) return false; // before the first syllable → closed
+  const cur = onsets[idx];
+  const nextStart = idx + 1 < onsets.length ? onsets[idx + 1].start : Infinity;
+  const noteEnd = typeof cur.end === "number" && cur.end > cur.start ? cur.end : cur.start + ONSET_HOLD_MS;
+  // Hold open for the note's length (bounded by the next syllable). No hard cap — a
+  // sustained note keeps the mouth open — but the tail closes to articulate the pop.
+  const playingEnd = Math.min(noteEnd, nextStart);
+  if (progressMs >= playingEnd) return false; // note ended → rest → closed
+  const noteLen = playingEnd - cur.start;
+  const close = Math.min(FRAME_CLOSE_MAX_MS, Math.max(FRAME_CLOSE_MIN_MS, noteLen * FRAME_CLOSE_FRACTION));
+  return progressMs < playingEnd - close; // open through the body; closed for the tail
+}
+
+/**
+ * Frame decision for a beat-driven 2-frame cat (Bongo): swap the two frames once
+ * per beat (alternating by beat parity), matching the original looping bongo (one
+ * paw flap per beat). Runs off the beat *clock*, which has no playback-rate floor,
+ * so very slow BPMs animate correctly instead of hitting a minimum.
+ */
+export function beatFrameOpen(progressSec: number, feltBpm: number): boolean {
+  const bpm = feltBpm > 0 ? feltBpm : PULSE_DEFAULT_BPM;
+  const beatDur = 60 / bpm;
+  return beatDur > 0 && Math.floor(progressSec / beatDur) % 2 === 1;
+}
+
 const now = (): number =>
   typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
 
@@ -340,12 +414,12 @@ const OFF_CONFIG: PulseConfig = {
  * throttled to ~30fps.
  */
 export function createVideoPulse(player: PlayerClock): VideoPulse {
-  let video: HTMLVideoElement | null = null;
+  let video: CatMedia | null = null;
   let baseTransform = "";
-  // Optional mirror cat: a second video driven in lock-step — same brightness, the
+  // Optional mirror cat: a second element driven in lock-step — same brightness, the
   // same bounce composed onto its own (flipped/offset) rest transform, and its
   // playback frame-locked to the main so the two cats stay on the same frame.
-  let mirror: HTMLVideoElement | null = null;
+  let mirror: CatMedia | null = null;
   let mirrorBase = "";
   let lastMirrorFilter = "";
   let lastMirrorTransform = "";
@@ -354,8 +428,16 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
   let depth = DEFAULT_STAT;
   let delayMs = 0;
   let onsets: PulseOnset[] | null = null;
+  // Separate onsets the mirror cat pops on (background vocals). Null → mirror follows the main frame.
+  let mirrorOnsets: PulseOnset[] | null = null;
+  let loudnessSampler: ((ms: number) => number) | null = null; // Bongo "follow fluctuations"
   let playing = false; // pushed via setPlaying (event-driven, not polled)
   let raf: number | null = null;
+  // "Animate per pulse": drive the 2-frame clip's frame off syllables, not the beat.
+  let syllableFrames = false;
+  let lastFrameKind = -1; // 0 = resting frame, 1 = open frame; -1 forces the first swap
+  let lastMirrorFrameKind = -1; // the mirror's own frame state (so it can diverge from the main)
+  let frames: { closed: string; open: string } | null = null; // set for an <img> source (Pop Cat)
 
   // Extrapolated clock: anchor once, then advance with wall-time, re-anchoring
   // only on a seek. Between Spotify's coarse progress ticks the pulse runs off
@@ -390,10 +472,12 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
   // Keep the mirror's playback locked to the main: same rate + play state (both
   // cheap, every frame), and a drift-corrected currentTime (a seek — throttled).
   function syncMirrorPlayback(t: number): void {
-    const m = mirror;
-    if (!m || !video) return;
-    if (m.playbackRate !== video.playbackRate) m.playbackRate = video.playbackRate;
-    if (video.paused) {
+    // Only reached in <video> (looping) mode — the image source never calls this.
+    const m = mirror as HTMLVideoElement | null;
+    const v = video as HTMLVideoElement | null;
+    if (!m || !v) return;
+    if (m.playbackRate !== v.playbackRate) m.playbackRate = v.playbackRate;
+    if (v.paused) {
       if (!m.paused) m.pause();
     } else if (m.paused) {
       const p = m.play();
@@ -403,8 +487,8 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
     // drift, and no more than once per interval, so it can't churn the decoder.
     if (t - lastMirrorSeekAt >= MIRROR_SEEK_INTERVAL_MS) {
       lastMirrorSeekAt = t;
-      if (Math.abs(m.currentTime - video.currentTime) > MIRROR_DRIFT_S) {
-        m.currentTime = video.currentTime;
+      if (Math.abs(m.currentTime - v.currentTime) > MIRROR_DRIFT_S) {
+        m.currentTime = v.currentTime;
       }
     }
   }
@@ -443,14 +527,165 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
     return est; // ignore the coarse per-tick sample; stay smooth
   }
 
+  // Write the brightness filter + bounce transform (and mirror) for the given
+  // envelopes. Shared by the beat/onset path and the per-pulse frame path.
+  function paint(
+    cfg: PulseConfig,
+    brightnessEnv: number,
+    scaleEnv: number,
+    brightnessDimScale: number,
+    scaleOverride?: { sx: number; sy: number }
+  ): void {
+    if (!video) return;
+    const filterStr = cfg.brightness
+      ? `brightness(${brightnessFor(brightnessEnv, depth, cfg.brightnessIntensity, true, brightnessDimScale).toFixed(3)})`
+      : "";
+    if (filterStr !== lastFilter) {
+      video.style.filter = filterStr;
+      lastFilter = filterStr;
+    }
+    // scaleOverride lets a caller supply its own sx/sy (e.g. Pop Cat's squash & stretch);
+    // otherwise the standard upward bounce (sy from scaleFor, slight sx lean).
+    const sy = scaleOverride ? scaleOverride.sy : scaleFor(scaleEnv, depth, cfg.scaleIntensity, true);
+    const sx = scaleOverride ? scaleOverride.sx : 1 + (sy - 1) * SCALE_ANGLE_RATIO;
+    const transformStr = cfg.scale
+      ? `${baseTransform} scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`.trim()
+      : baseTransform;
+    if (transformStr !== lastTransform) {
+      video.style.transform = transformStr;
+      lastTransform = transformStr;
+    }
+    applyMirror(filterStr, sx, sy, cfg.scale);
+  }
+
+  // Show a specific frame of a paused clip. A paused <video> in Spotify's Chromium
+  // won't repaint on a programmatic currentTime change, so we seek then micro-play
+  // for one animation frame (playing always paints) and re-pause — landing on, and
+  // holding, the target frame. Seeks to the middle of the frame's window so an edge
+  // seek can't round to the neighbour, and the ~1-frame play can't cross into it.
+  function showFrame(el: HTMLVideoElement, target: number): void {
+    try {
+      el.currentTime = target;
+    } catch {
+      return; // metadata not ready — the next state change retries
+    }
+    const p = el.play();
+    if (p && typeof p.then === "function") p.catch(() => {});
+    requestAnimationFrame(() => {
+      try {
+        el.pause();
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
+  // Per-pulse frame driver: resting frame between syllables, open frame while one
+  // sounds. Only acts on a state change. For an image source (Pop Cat) it swaps the
+  // <img> src (instant, reliable); a <video> source falls back to the seek path.
+  // Put one element on frame `kind` (1 = open/singing, 0 = resting): an <img> src swap for Pop/Bongo,
+  // else a seek to the middle of the clip's frame for a <video> source.
+  function setFrameOn(el: CatMedia, kind: number): void {
+    if (frames) {
+      const src = kind === 1 ? frames.open : frames.closed;
+      const img = el as HTMLImageElement;
+      if (img.src !== src) img.src = src;
+      return;
+    }
+    const v = el as HTMLVideoElement;
+    const dur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0.4;
+    showFrame(v, kind === 1 ? dur * 0.75 : dur * 0.25); // middle of frame 2 / frame 1
+  }
+
+  function driveMainFrame(open: boolean): void {
+    if (!video) return;
+    const kind = open ? 1 : 0;
+    if (kind === lastFrameKind) return;
+    lastFrameKind = kind;
+    setFrameOn(video, kind);
+  }
+
+  // The mirror has its OWN frame state so it can sing a different part (background vocals) than the
+  // main cat; when `mirrorOnsets` is null the caller passes the main's open-state, so it mirrors.
+  function driveMirrorFrame(open: boolean): void {
+    if (!mirror) return;
+    const kind = open ? 1 : 0;
+    if (kind === lastMirrorFrameKind) return;
+    lastMirrorFrameKind = kind;
+    setFrameOn(mirror, kind);
+  }
+
   function frame(): void {
     raf = requestAnimationFrame(frame);
     if (!video) return;
     const t = now();
     if (t - lastFrameAt < FRAME_INTERVAL_MS) return; // fps throttle
     lastFrameAt = t;
-    syncMirrorPlayback(t); // keep the mirror's flap + play state locked to the main
     const cfg = config; // pushed via setConfig — no localStorage in the loop
+    // Image sources drive the mirror's frame themselves (via the image swap); the
+    // video play-state sync only applies to the looping <video> sources.
+    if (!frames) syncMirrorPlayback(t);
+
+    // Image sources (2-frame cats): the frame is driven off the pulse — by syllables
+    // for Pop Cat (syllableFrames), else by the beat for Bongo. The bounce/brightness
+    // still follow the beat. Freezes the current frame when paused / on a non-track.
+    if (frames) {
+      if (!playing || depth <= 0) {
+        clockPlaying = false;
+        if (!idle) {
+          reset(); // rest the brightness/bounce; the paused frame stays put
+          idle = true;
+        }
+        return;
+      }
+      idle = false;
+      const ms = estProgressMs();
+      const felt = feltBpm ?? PULSE_DEFAULT_BPM;
+      const phase = beatPhase((ms - delayMs) / 1000, felt);
+      const beatOpen = beatFrameOpen((ms - delayMs) / 1000, felt);
+      // Pop Cat → mouth follows the sung syllable; Bongo → one paw-flap per beat (parity). When Pop has
+      // NO lyric onsets at all (an un-timed / lyric-less track), its mouth falls back to the beat so it
+      // still pops instead of sitting shut — but once onsets exist it tracks them (resting through the
+      // instrumental gaps, as designed), never the beat.
+      const haveOnsets = !!(onsets && onsets.length);
+      const mainOpen = syllableFrames ? (haveOnsets ? syllableFrameOpen(ms, onsets) : beatOpen) : beatOpen;
+      driveMainFrame(mainOpen);
+      // The mirror pops on its OWN (background-vocal) onsets when set — so it can sing a different
+      // part than the main cat — otherwise it follows the main cat's frame.
+      driveMirrorFrame(mirrorOnsets && mirrorOnsets.length ? syllableFrameOpen(ms, mirrorOnsets) : mainOpen);
+      // Brightness/bounce for a 2-frame cat:
+      //   • Pop Cat rests at natural brightness and *dips* on the beat (darken-bop).
+      //   • Bongo follows the live audio loudness when a sampler is set (visualizer mode),
+      //     else the lyric syllables when available, else the beat.
+      const beatBright = beatEnvelope(phase, BRIGHTNESS_SHARPNESS);
+      if (syllableFrames) {
+        // Pop Cat follows the BEAT (every other beat, off a half-tempo phase), independent
+        // of the lyrics — only the mouth frame tracks the sung words. The bounce is a
+        // squash & stretch (stretch on the beat, squash just after), with a shallow
+        // brightness dip. Amplitude still respects song strength + the intensity slider.
+        const halfPhase = beatPhase((ms - delayMs) / 1000, felt / 2);
+        // Min (chill) sits at 0.6 of max rather than dropping with the max cut, so low-
+        // danceability still bounces visibly; high-danceability reaches the full (halved) max.
+        const amp = clamp01(cfg.scaleIntensity) * (0.6 + 0.4 * strengthCurve(depth));
+        const stretch = beatEnvelope(halfPhase, SCALE_SHARPNESS);
+        const squash = beatEnvelope(halfPhase - POP_SQUASH_DELAY, SCALE_SHARPNESS);
+        const v = cfg.scale ? amp * (POP_STRETCH * stretch - POP_SQUASH * squash) : 0; // signed Δheight
+        // Brightness + bounce are the BEAT pulse, SHARED by both cats (paint → applyMirror writes the
+        // same transform/filter to the mirror). Only the mouth frame diverges per who's singing — the
+        // main pops on `onsets`, the mirror on `mirrorOnsets` (driveMainFrame/driveMirrorFrame above).
+        paint(cfg, 1 - beatEnvelope(halfPhase, BRIGHTNESS_SHARPNESS), 0, POP_DIM_SCALE, { sy: 1 + v, sx: 1 - v * POP_VOLUME });
+      } else if (loudnessSampler) {
+        const l = clamp01(loudnessSampler(ms)); // exact audio fluctuation → pulse strength
+        paint(cfg, l, l, 1);
+      } else if (onsets && onsets.length) {
+        const artic = onsetArticulation(ms, onsets);
+        paint(cfg, sustainEnvelope(ms, onsets) * (1 - ARTIC_DEPTH * artic), onsetEnvelope(ms, onsets), 1);
+      } else {
+        paint(cfg, beatBright, beatEnvelope(phase, SCALE_SHARPNESS), BEAT_DIM_SCALE);
+      }
+      return;
+    }
+
     if ((!cfg.brightness && !cfg.scale) || !playing || depth <= 0) {
       clockPlaying = false; // resume re-anchors instead of jumping the paused gap
       if (!idle) {
@@ -480,31 +715,12 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
       scaleEnv = beatEnvelope(phase, SCALE_SHARPNESS); // snappier bounce
       brightnessDimScale = BEAT_DIM_SCALE;
     }
-    // brightness() on the video respects its alpha (cat-shaped, no box). Peak is 1
-    // (natural, full detail). Only write when the value changes (skips rest writes).
-    const filterStr = cfg.brightness
-      ? `brightness(${brightnessFor(brightnessEnv, depth, cfg.brightnessIntensity, true, brightnessDimScale).toFixed(3)})`
-      : "";
-    if (filterStr !== lastFilter) {
-      video.style.filter = filterStr;
-      lastFilter = filterStr;
-    }
-    // Non-uniform scale about the bottom-left pivot: mostly vertical (sy) with a
-    // slight rightward lean (sx), so the bottom edge stays fixed.
-    const sy = scaleFor(scaleEnv, depth, cfg.scaleIntensity, true);
-    const sx = 1 + (sy - 1) * SCALE_ANGLE_RATIO;
-    const transformStr = cfg.scale
-      ? `${baseTransform} scale(${sx.toFixed(4)}, ${sy.toFixed(4)})`.trim()
-      : baseTransform;
-    if (transformStr !== lastTransform) {
-      video.style.transform = transformStr;
-      lastTransform = transformStr;
-    }
-    applyMirror(filterStr, sx, sy, cfg.scale); // same brightness + bounce on the mirror
+    // brightness() respects the cat's alpha (shape-correct, no box); peak is 1 (natural).
+    paint(cfg, brightnessEnv, scaleEnv, brightnessDimScale);
   }
 
   return {
-    attach(v: HTMLVideoElement | null): void {
+    attach(v: CatMedia | null): void {
       if (video && video !== v) reset();
       video = v;
       idle = false;
@@ -531,6 +747,25 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
     setOnsets(o: PulseOnset[] | null): void {
       onsets = o && o.length ? [...o].sort((a, b) => a.start - b.start) : null;
     },
+    setMirrorOnsets(o: PulseOnset[] | null): void {
+      mirrorOnsets = o && o.length ? [...o].sort((a, b) => a.start - b.start) : null;
+      lastMirrorFrameKind = -1; // re-assert the mirror's frame against the new (or cleared) stream
+    },
+    setSyllableFrames(on: boolean): void {
+      if (on === syllableFrames) return;
+      syllableFrames = on;
+      lastFrameKind = -1; // force the next driveFrames to set the correct frame
+      idle = false; // re-evaluate on the next frame (may need to paint/swap)
+    },
+    setFrames(f: { closed: string; open: string } | null): void {
+      frames = f;
+      lastFrameKind = -1; // re-assert the frame against the new image set
+      lastMirrorFrameKind = -1;
+    },
+    setLoudness(sampler: ((ms: number) => number) | null): void {
+      loudnessSampler = sampler;
+      idle = false; // re-evaluate on the next frame
+    },
     setConfig(c: PulseConfig): void {
       config = c;
     },
@@ -545,10 +780,11 @@ export function createVideoPulse(player: PlayerClock): VideoPulse {
         lastTransform = baseTransform;
       }
     },
-    setMirror(m: HTMLVideoElement | null): void {
+    setMirror(m: CatMedia | null): void {
       mirror = m;
       lastMirrorFilter = "";
       lastMirrorTransform = "";
+      lastMirrorFrameKind = -1; // force the mirror's frame to re-assert on the next loop
       lastMirrorSeekAt = -Infinity; // sync the freshly-attached mirror on the next frame
       if (m) {
         mirrorBase = m.style.transform || "";
